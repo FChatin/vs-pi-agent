@@ -25,6 +25,7 @@ import { showPiPackageCatalogPicker } from '../pi/piPackageCatalogPicker';
 import { loadPiCodingAgent } from '../pi/piSdk';
 import { loadMcpSettingsSnapshot, probeMcpServer, setMcpServerEnabled } from '../pi/mcpConfig';
 import { getMissingRecommendedPackages } from '../pi/recommendedPackages';
+import { runPiLoginFlow, runPiLogoutFlow } from '../pi/slashCommands';
 
 const API_KEY_PREFIX = 'pi-agent.apiKey.';
 
@@ -129,7 +130,7 @@ export class SettingsPanel {
                     if (isSyncWithPiCli()) {
                         this._post({
                             type: 'error',
-                            message: 'API keys live in ~/.pi/agent/auth.json. Use "Open auth.json" below.',
+                            message: 'API keys live in ~/.pi/agent/auth.json. Use Configure provider (/login) or Open auth.json.',
                         });
                         return;
                     }
@@ -239,6 +240,12 @@ export class SettingsPanel {
                 case 'testAllMcpServers':
                     await this._testAllMcpServers();
                     break;
+                case 'runPiLogin':
+                    await this._runPiLogin();
+                    break;
+                case 'runPiLogout':
+                    await this._runPiLogout();
+                    break;
             }
         } catch (err: any) {
             this._post({ type: 'error', message: err.message ?? String(err) });
@@ -251,6 +258,26 @@ export class SettingsPanel {
         await this._sendMcpSnapshot();
         this._post({ type: 'piConfigUpdated' });
         this._post({ type: 'success', message: successMessage });
+    }
+
+    private async _runPiLogin(): Promise<void> {
+        const session = this._piSession?.session;
+        if (!session) {
+            this._post({ type: 'error', message: 'No active Pi session. Open the chat sidebar and try again.' });
+            return;
+        }
+        await runPiLoginFlow(session);
+        await this._sendSettings();
+    }
+
+    private async _runPiLogout(): Promise<void> {
+        const session = this._piSession?.session;
+        if (!session) {
+            this._post({ type: 'error', message: 'No active Pi session. Open the chat sidebar and try again.' });
+            return;
+        }
+        await runPiLogoutFlow(session);
+        await this._sendSettings();
     }
 
     private async _sendMcpSnapshot(): Promise<void> {

@@ -150,6 +150,7 @@ function buildPiAgentSection(data: SettingsData): HTMLElement {
 
     wrap.appendChild(buildSection('Agent directory', [
         buildReadOnlyRow('Path', data.piAgentDir),
+        buildAuthActionsRow(),
         buildFileButtons(),
         buildAuthIndicator(data.authMethod),
         buildAuthProvidersList(cfg),
@@ -374,6 +375,11 @@ function renderMcpSection(): void {
 
 function buildExtensionOnlySections(data: SettingsData): HTMLElement {
     const wrap = el('div', 'extension-only-sections');
+    wrap.appendChild(buildSection('Authentication', [
+        buildAuthActionsRow(),
+        buildAuthIndicator(data.authMethod),
+        buildReadOnlyRow('Credentials file', `${data.piAgentDir}/auth.json`),
+    ]));
     wrap.appendChild(buildSection('API Connection', [
         buildSelect('apiProvider', 'Provider', data.apiProvider, [
             { value: '', label: 'Auto-detect' },
@@ -412,10 +418,23 @@ function buildFileButtons(): HTMLElement {
     return row;
 }
 
+function buildAuthActionsRow(): HTMLElement {
+    const row = el('div', 'setting-row auth-actions');
+    row.innerHTML = `
+        <div class="setting-label-row"><label>Provider authentication</label></div>
+        <div class="btn-row">
+            <button type="button" class="setting-btn primary" id="btn-pi-login">Configure provider (/login)</button>
+            <button type="button" class="setting-btn secondary" id="btn-pi-logout">Remove credentials (/logout)</button>
+        </div>
+        <p class="setting-description">Same flow as typing <code>/login</code> in chat. Saves API keys and OAuth tokens to <code>auth.json</code>. No Pi CLI required.</p>
+    `;
+    return row;
+}
+
 function buildAuthProvidersList(cfg: PiAgentConfigData): HTMLElement {
     const row = el('div', 'setting-row');
     if (cfg.authProviders.length === 0) {
-        row.innerHTML = `<p class="setting-description">No providers in auth.json yet. Open auth.json or add keys via Pi CLI.</p>`;
+        row.innerHTML = `<p class="setting-description">No providers in auth.json yet. Use <strong>Configure provider</strong> above or open auth.json.</p>`;
         return row;
     }
     const items = cfg.authProviders.map((p) =>
@@ -925,6 +944,14 @@ function bindEvents(): void {
 
     document.getElementById('btn-reload-pi-session')?.addEventListener('click', () => {
         vscode.postMessage({ type: 'reloadPiSession' });
+    });
+
+    document.getElementById('btn-pi-login')?.addEventListener('click', () => {
+        vscode.postMessage({ type: 'runPiLogin' });
+    });
+
+    document.getElementById('btn-pi-logout')?.addEventListener('click', () => {
+        vscode.postMessage({ type: 'runPiLogout' });
     });
 
     document.getElementById('btn-browse-pi-catalog')?.addEventListener('click', () => {
