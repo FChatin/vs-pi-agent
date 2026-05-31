@@ -108,6 +108,12 @@ npm run test:unit
 
 Press **F5** for Extension Development Host.
 
+Optional — keep Cursor from adding `cursoragent` as a GitHub co-author:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## Publish VSIX
 
 ```bash
