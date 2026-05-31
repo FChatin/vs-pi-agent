@@ -298,7 +298,9 @@ export type SettingsClientMessage =
     | { type: 'getMcpSnapshot' }
     | { type: 'setMcpServerEnabled'; scope: McpScopeId; serverName: string; enabled: boolean }
     | { type: 'testMcpServer'; serverName: string }
-    | { type: 'testAllMcpServers' };
+    | { type: 'testAllMcpServers' }
+    | { type: 'runPiLogin' }
+    | { type: 'runPiLogout' };
 
 // Extension -> Webview messages
 export type ServerMessage =

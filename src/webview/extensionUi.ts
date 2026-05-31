@@ -89,15 +89,15 @@ function optionLetter(index: number): string {
 }
 
 function renderRequest(req: ExtensionUiRequestPayload): string {
-    const title = req.title?.trim() || 'Seçim gerekli';
+    const title = req.title?.trim() || 'Selection required';
     const badge =
         req.method === 'select'
-            ? 'Soru'
+            ? 'Question'
             : req.method === 'confirm'
-              ? 'Onay'
+              ? 'Confirm'
               : req.method === 'editor'
-                ? 'Metin'
-                : 'Girdi';
+                ? 'Text'
+                : 'Input';
 
     if (req.method === 'confirm') {
         const msg = req.message?.trim() || '';
@@ -109,15 +109,15 @@ function renderRequest(req: ExtensionUiRequestPayload): string {
                     ${msg ? `<p class="extension-ui-subtitle">${escHtml(msg)}</p>` : ''}
                 </div>
                 <div class="extension-ui-actions-row">
-                    <button type="button" class="extension-ui-btn primary" data-extension-ui-confirm="yes">Evet</button>
-                    <button type="button" class="extension-ui-btn" data-extension-ui-confirm="no">Hayır</button>
-                    <button type="button" class="extension-ui-btn ghost" data-extension-ui-cancel>İptal</button>
+                    <button type="button" class="extension-ui-btn primary" data-extension-ui-confirm="yes">Yes</button>
+                    <button type="button" class="extension-ui-btn" data-extension-ui-confirm="no">No</button>
+                    <button type="button" class="extension-ui-btn ghost" data-extension-ui-cancel>Cancel</button>
                 </div>
             </div>`;
     }
 
     if (req.method === 'input' || req.method === 'editor') {
-        const placeholder = req.placeholder?.trim() || 'Yanıtınızı yazın…';
+        const placeholder = req.placeholder?.trim() || 'Type your answer…';
         const prefill = req.prefill ?? '';
         const rows = req.method === 'editor' ? 4 : 2;
         return `
@@ -125,12 +125,12 @@ function renderRequest(req: ExtensionUiRequestPayload): string {
                 <div class="extension-ui-header">
                     <span class="extension-ui-badge">${badge}</span>
                     <div class="extension-ui-title">${escHtml(title)}</div>
-                    <p class="extension-ui-subtitle">Gönder ile yanıtla; boş bırakırsanız İptal.</p>
+                    <p class="extension-ui-subtitle">Submit to reply; leave empty and use Cancel to dismiss.</p>
                 </div>
                 <textarea id="extension-ui-input" class="extension-ui-textarea" rows="${rows}" placeholder="${escHtml(placeholder)}">${escHtml(prefill)}</textarea>
                 <div class="extension-ui-actions-row">
-                    <button type="button" class="extension-ui-btn primary" data-extension-ui-submit>Gönder</button>
-                    <button type="button" class="extension-ui-btn ghost" data-extension-ui-cancel>İptal</button>
+                    <button type="button" class="extension-ui-btn primary" data-extension-ui-submit>Submit</button>
+                    <button type="button" class="extension-ui-btn ghost" data-extension-ui-cancel>Cancel</button>
                 </div>
             </div>`;
     }
@@ -153,11 +153,11 @@ function renderRequest(req: ExtensionUiRequestPayload): string {
             <div class="extension-ui-header">
                 <span class="extension-ui-badge">${badge}</span>
                 <div class="extension-ui-title">${escHtml(title)}</div>
-                <p class="extension-ui-subtitle">Bir seçeneğe tıklayın — yazarak A/B/C yazmanıza gerek yok.</p>
+                <p class="extension-ui-subtitle">Click an option — no need to type A/B/C in chat.</p>
             </div>
             <div class="extension-ui-options">${optionButtons}</div>
             <div class="extension-ui-actions-row">
-                <button type="button" class="extension-ui-btn ghost" data-extension-ui-cancel>İptal</button>
+                <button type="button" class="extension-ui-btn ghost" data-extension-ui-cancel>Cancel</button>
             </div>
         </div>`;
 }

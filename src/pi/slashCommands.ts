@@ -86,10 +86,10 @@ export async function tryHandleBuiltinSlashCommand(
 
     switch (command) {
         case 'login':
-            await runLoginFlow(session);
+            await runPiLoginFlow(session);
             return true;
         case 'logout':
-            await runLogoutFlow(session);
+            await runPiLogoutFlow(session);
             return true;
         case 'model':
             await manager.showModelPicker(args || undefined);
@@ -126,7 +126,8 @@ export async function tryHandleBuiltinSlashCommand(
     }
 }
 
-async function runLoginFlow(session: AgentSession): Promise<void> {
+/** Same interactive flow as chat `/login` — usable from settings and command palette. */
+export async function runPiLoginFlow(session: AgentSession): Promise<void> {
     const authType = await vscode.window.showQuickPick(
         [
             { label: 'Use a subscription (OAuth)', id: 'oauth' as const },
@@ -226,7 +227,8 @@ function getLoginProviderOptions(
     return options.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-async function runLogoutFlow(session: AgentSession): Promise<void> {
+/** Same interactive flow as chat `/logout`. */
+export async function runPiLogoutFlow(session: AgentSession): Promise<void> {
     const authStorage = session.modelRegistry.authStorage;
     const stored = authStorage.list();
     if (stored.length === 0) {

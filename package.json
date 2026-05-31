@@ -1,8 +1,8 @@
 {
-  "name": "vs-pi-agent",
-	"displayName": "vs-pi-agent",
+  "name": "vscode-pi-agent",
+	"displayName": "vscode-pi-agent",
   "description": "Pi coding agent in VS Code — sidebar chat, tools, sessions, and sync with ~/.pi/agent.",
-	"version": "0.2.38",
+	"version": "0.2.39",
 	"publisher": "fchatin",
   "license": "MIT",
   "repository": {
