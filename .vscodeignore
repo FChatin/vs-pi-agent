@@ -1,0 +1,12 @@
+.vscode/**
+.vscode-test/**
+# Styles ship as out/webview/styles/ after npm run compile (see esbuild.js copyStyles).
+src/**
+.github/**
+.gitignore
+vitest.config.ts
+tsconfig.json
+esbuild.js
+*.map
+*.vsix
+.kemdicode-mcp.json

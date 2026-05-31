@@ -1,0 +1,243 @@
+{
+  "name": "vs-pi-agent",
+	"displayName": "vs-pi-agent",
+  "description": "Pi coding agent in VS Code — sidebar chat, tools, sessions, and sync with ~/.pi/agent.",
+	"version": "0.2.38",
+	"publisher": "fchatin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FChatin/vs-pi-agent.git"
+  },
+  "homepage": "https://github.com/FChatin/vs-pi-agent",
+  "bugs": {
+    "url": "https://github.com/FChatin/vs-pi-agent/issues"
+  },
+  "icon": "media/pi-icon-full.png",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "pi-agent",
+          "title": "vs-pi-agent",
+          "icon": "media/pi-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "pi-agent": [
+        {
+          "type": "webview",
+          "id": "pi-agent.chat",
+          "name": "vs-pi-agent"
+        }
+      ]
+    },
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "pi-agent.attachFilesFromExplorer",
+          "when": "explorerResourceIsFile",
+          "group": "9_cutcopypaste@5"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "pi-agent.attachFilesFromExplorer",
+          "when": "resourceScheme == file",
+          "group": "9_cutcopypaste@5"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "pi-agent.attachFiles",
+          "when": "view == pi-agent.chat",
+          "group": "navigation@1"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "pi-agent.newChat",
+        "title": "vs-pi-agent: New Chat"
+      },
+      {
+        "command": "pi-agent.abort",
+        "title": "vs-pi-agent: Stop Generation"
+      },
+      {
+        "command": "pi-agent.selectModel",
+        "title": "vs-pi-agent: Select Model"
+      },
+      {
+        "command": "pi-agent.toggleThinking",
+        "title": "vs-pi-agent: Toggle Thinking Level"
+      },
+      {
+        "command": "pi-agent.focusChat",
+        "title": "vs-pi-agent: Focus Chat"
+      },
+      {
+        "command": "pi-agent.attachFiles",
+        "title": "vs-pi-agent: Attach Files",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "pi-agent.attachFilesFromExplorer",
+        "title": "vs-pi-agent: Add to Chat"
+      },
+      {
+        "command": "pi-agent.openSettings",
+        "title": "vs-pi-agent: Open Settings"
+      },
+      {
+        "command": "pi-agent.login",
+        "title": "vs-pi-agent: Login (/login)"
+      },
+      {
+        "command": "pi-agent.logout",
+        "title": "vs-pi-agent: Logout (/logout)"
+      },
+      {
+        "command": "pi-agent.reloadSession",
+        "title": "vs-pi-agent: Reload Session (/reload)"
+      },
+      {
+        "command": "pi-agent.installRecommendedPackages",
+        "title": "vs-pi-agent: Install Recommended Packages"
+      },
+      {
+        "command": "pi-agent.browsePackages",
+        "title": "vs-pi-agent: Browse Package Catalog"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "pi-agent.focusChat",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l"
+      },
+      {
+        "command": "pi-agent.newChat",
+        "key": "ctrl+shift+n",
+        "mac": "cmd+shift+n"
+      },
+      {
+        "command": "pi-agent.abort",
+        "key": "escape",
+        "when": "pi-agent.isStreaming"
+      }
+    ],
+    "configuration": {
+      "title": "vs-pi-agent",
+      "properties": {
+        "pi-agent.syncWithPiCli": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use Pi CLI config (~/.pi/agent): auth, settings.json, packages, skills, and sessions. Recommended."
+        },
+        "pi-agent.apiProvider": {
+          "type": "string",
+          "default": "",
+          "description": "Preferred AI provider (only when syncWithPiCli is false). Leave empty for automatic detection."
+        },
+        "pi-agent.apiBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Custom API base URL for self-hosted or proxy endpoints. Leave empty to use the provider default."
+        },
+        "pi-agent.defaultModel": {
+          "type": "string",
+          "default": "",
+          "description": "Default model ID to use when starting new sessions (e.g. claude-sonnet-4-20250514). Leave empty for automatic selection."
+        },
+        "pi-agent.thinkingLevel": {
+          "type": "string",
+          "default": "off",
+          "enum": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "description": "Default thinking level for Pi agent responses"
+        },
+        "pi-agent.autoApproveTools": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically approve tool executions without confirmation"
+        },
+        "pi-agent.allowedTools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Restrict which tools the agent can use. Leave empty to allow all tools."
+        },
+        "pi-agent.autoSaveSessions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically persist sessions"
+        },
+        "pi-agent.sessionStoragePath": {
+          "type": "string",
+          "default": "",
+          "description": "Custom session directory (only when syncWithPiCli is false). When sync is on, uses ~/.pi/agent/sessions/ like Pi CLI."
+        },
+        "pi-agent.contextUsageWarningThreshold": {
+          "type": "number",
+          "default": 80,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Show a warning when context usage exceeds this percentage of the context window"
+        },
+        "pi-agent.promptRecommendedPackages": {
+          "type": "boolean",
+          "default": true,
+          "description": "When Pi CLI sync is on, prompt to install recommended Pi packages (~/.pi/agent) if they are missing."
+        },
+        "pi-agent.autoInstallRecommendedPackages": {
+          "type": "boolean",
+          "default": false,
+          "description": "Install recommended Pi packages automatically on startup without asking (requires network/npm)."
+        }
+      }
+    }
+  },
+	"scripts": {
+		"compile": "node esbuild.js",
+		"watch": "node esbuild.js --watch",
+		"vscode:prepublish": "npm run compile",
+		"package": "npm run compile && npx @vscode/vsce package --no-rewrite-relative-links",
+		"package:verify": "unzip -l vs-pi-agent-*.vsix | grep -E 'out/webview/styles|media/icons'",
+    "test": "vitest",
+    "test:unit": "vitest run",
+    "test:integration": "node out/test/integration/runTest.js",
+    "test:all": "npm run test:unit && npm run test:integration"
+  },
+	"dependencies": {
+		"@earendil-works/pi-agent-core": "^0.78.0",
+		"@earendil-works/pi-coding-agent": "^0.78.0",
+		"marked": "^18.0.2",
+		"proper-lockfile": "^4.1.2"
+	},
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.100.0",
+    "@vscode/test-electron": "^2.5.2",
+    "esbuild": "^0.25.0",
+    "mocha": "^11.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}

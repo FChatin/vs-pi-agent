@@ -1,0 +1,14 @@
+out/
+node_modules/
+*.vsix
+.vscode-test/
+.DS_Store
+.env
+.env.*
+!.env.example
+.kemdicode-mcp.json
+screenshot.png
+AGENTS.md
+TODO.md
+HandOff/
+.env.local
