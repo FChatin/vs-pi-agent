@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { attachJsonlLineReader, serializeJsonLine } from './jsonl';
 import { piCliChildEnv, resolvePiCliInvocation } from './piCliPaths';
+import { isVscodeOnlySlash } from './slashCommandRouter';
 import type {
     PiAgentEvent,
     PiRpcOutbound,
@@ -53,11 +54,17 @@ export class PiRpcBridge {
 
         this._exitError = null;
         this._stderr = '';
+        const childEnv: NodeJS.ProcessEnv = {
+            ...piCliChildEnv(invocation),
+            PI_CURSOR_SETTING_SOURCES: 'none',
+            PI_CURSOR_TOOL_MANIFEST: '0',
+        };
+
 
         const child = spawn(invocation.nodePath, [invocation.cliJsPath, ...args], {
             cwd,
             stdio: ['pipe', 'pipe', 'pipe'],
-            env: piCliChildEnv(invocation),
+            env: childEnv,
         });
         this._process = child;
 
@@ -222,14 +229,23 @@ export class PiRpcBridge {
         images?: RpcImageContent[],
         streamingBehavior?: 'steer' | 'followUp',
     ): Promise<void> {
+        if (isVscodeOnlySlash(message)) {
+            return;
+        }
         await this._send({ type: 'prompt', message, images, streamingBehavior });
     }
 
     async steer(message: string, images?: RpcImageContent[]): Promise<void> {
+        if (isVscodeOnlySlash(message)) {
+            return;
+        }
         await this._send({ type: 'steer', message, images });
     }
 
     async followUp(message: string, images?: RpcImageContent[]): Promise<void> {
+        if (isVscodeOnlySlash(message)) {
+            return;
+        }
         await this._send({ type: 'follow_up', message, images });
     }
 

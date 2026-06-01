@@ -33,6 +33,7 @@ import {
     processPastedImages,
     type PastedImageInput,
 } from '../pi/fileAttachments';
+import { isSlashOnlyInput, isVscodeOnlySlash, tryHandleSlashCommand } from '../pi/slashCommandRouter';
 import {
     type PendingAttachment,
     type QueuedPrompt,
@@ -78,6 +79,8 @@ interface TabState {
     planModeOverride?: 'agent' | 'plan';
     /** Ignore streaming deltas until Pi confirms agent_end (Stop clicked). */
     abortInFlight: boolean;
+    /** Skip auto-draining the queue (e.g. while interrupt-and-send is in flight). */
+    suppressQueueDrain: boolean;
 }
 
 let tabIdCounter = 0;
@@ -125,6 +128,7 @@ function makeTabState(
         lastPlanEditorHash: '',
         connectionStatus: { phase: 'idle' },
         abortInFlight: false,
+        suppressQueueDrain: false,
     };
 }
 
@@ -249,6 +253,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         const post = (m: ServerMessage) => this._post(m);
         session.rpcExtensionUi.setPost(post);
+        session.setPostChatError((message) => post({ type: 'error', message }));
         session.extensionChrome.setPost((m) => {
             post(m);
             if (m.type === 'piExtensionChrome') {
@@ -492,6 +497,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         tab.diffManager.setCurrentTurn(turnIdx);
     }
 
+    private async _tryHandleSlashOnlyPrompt(
+        tab: TabState,
+        text: string,
+        attachments: PendingAttachment[],
+    ): Promise<boolean> {
+        const trimmed = text.trim();
+        // /login, /logout, /test-error must never reach Pi RPC or the model, even with attachments.
+        if (isVscodeOnlySlash(trimmed)) {
+            await tryHandleSlashCommand(tab.session, trimmed);
+            return true;
+        }
+        if (!isSlashOnlyInput(trimmed) || attachments.length > 0) {
+            return false;
+        }
+        await tryHandleSlashCommand(tab.session, trimmed);
+        return true;
+    }
+
     private async _dispatchPrompt(
         tab: TabState,
         userText: string,
@@ -506,7 +529,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     /** Drain queue when tab and Pi session are both idle (covers missed agent_end / stale UI). */
     private _maybeDrainQueuedMessages(tab: TabState, isActive: boolean): void {
-        if (tab.queueDrainInFlight || tab.isStreaming) {
+        if (tab.suppressQueueDrain || tab.queueDrainInFlight || tab.isStreaming) {
             return;
         }
         if (tab.session.session?.isStreaming) {
@@ -543,6 +566,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         const { text, images } = composePrompt(item.text, item.attachments);
         if (!text && images.length === 0) {
+            await this._runNextQueuedPrompt(tab, isActive);
+            return;
+        }
+        try {
+            if (await this._tryHandleSlashOnlyPrompt(tab, item.text, item.attachments)) {
+                if (isActive) {
+                    this.sendStateSync();
+                }
+                await this._runNextQueuedPrompt(tab, isActive);
+                return;
+            }
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this._outputChannel.appendLine(`Queued slash command failed: ${msg}`);
+            if (isActive) {
+                this._post({ type: 'error', message: msg });
+            }
             await this._runNextQueuedPrompt(tab, isActive);
             return;
         }
@@ -602,9 +642,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         } finally {
             tab.abortInFlight = false;
             tab.isStreaming = false;
-            if (tab.id === this._activeTabId) {
+            if (tab.session.session) {
+                tab.session.session.isStreaming = false;
+                tab.session.session.isRetrying = false;
+            }
+            const isActive = tab.id === this._activeTabId;
+            if (isActive) {
                 vscode.commands.executeCommand('setContext', 'pi-agent.isStreaming', false);
                 this.sendStateSync();
+            }
+            if (!tab.suppressQueueDrain) {
+                this._maybeDrainQueuedMessages(tab, isActive);
             }
         }
     }
@@ -1182,6 +1230,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const tab = this._activeTab;
 
             switch (msg.type) {
+                case 'slashCommand': {
+                    if (!tab.session.isReady) {
+                        this._post({
+                            type: 'error',
+                            message:
+                                'Pi agent is not ready yet. Wait for startup to finish or reload the window.',
+                        });
+                        break;
+                    }
+                    try {
+                        await tryHandleSlashCommand(tab.session, msg.text.trim());
+                        void this.pushStateSync();
+                    } catch (err: unknown) {
+                        const errMsg = err instanceof Error ? err.message : String(err);
+                        this._post({ type: 'error', message: errMsg });
+                        void this.pushStateSync();
+                    }
+                    break;
+                }
                 case 'prompt': {
                     if (!tab.session.isReady) {
                         this._post({
@@ -1193,6 +1260,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
                     const attachments = [...tab.pendingAttachments];
                     tab.pendingAttachments = [];
+                    const trimmed = msg.text.trim();
+                    // Slash commands: handle locally, do not start a turn or send to the model.
+                    try {
+                        if (await this._tryHandleSlashOnlyPrompt(tab, trimmed, attachments)) {
+                            void this.pushStateSync();
+                            break;
+                        }
+                    } catch (err: unknown) {
+                        const errMsg = err instanceof Error ? err.message : String(err);
+                        this._post({ type: 'error', message: errMsg });
+                        void this.pushStateSync();
+                        break;
+                    }
                     this._startTurn(tab);
                     tab.isStreaming = true;
                     if (tab.id === this._activeTabId) {
@@ -1274,6 +1354,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     if (!trimmed && attachments.length === 0) {
                         break;
                     }
+                    try {
+                        if (await this._tryHandleSlashOnlyPrompt(tab, trimmed, attachments)) {
+                            void this.pushStateSync();
+                            break;
+                        }
+                    } catch (err: unknown) {
+                        const errMsg = err instanceof Error ? err.message : String(err);
+                        this._post({ type: 'error', message: errMsg });
+                        void this.pushStateSync();
+                        break;
+                    }
                     if (!this._uiIsStreaming(tab)) {
                         this._startTurn(tab);
                         tab.isStreaming = true;
@@ -1299,6 +1390,63 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
                     tab.queuedMessages.push({ text: trimmed, attachments });
                     void this.pushStateSync();
+                    break;
+                }
+                case 'interruptAndSend': {
+                    if (!tab.session.isReady) {
+                        this._post({
+                            type: 'error',
+                            message:
+                                'Pi agent is not ready yet. Wait for startup to finish or reload the window.',
+                        });
+                        break;
+                    }
+                    const trimmed = msg.text.trim();
+                    const attachments = [...tab.pendingAttachments];
+                    tab.pendingAttachments = [];
+                    if (!trimmed && attachments.length === 0) {
+                        break;
+                    }
+                    tab.suppressQueueDrain = true;
+                    try {
+                        try {
+                            if (await this._tryHandleSlashOnlyPrompt(tab, trimmed, attachments)) {
+                                void this.pushStateSync();
+                                break;
+                            }
+                        } catch (err: unknown) {
+                            const errMsg = err instanceof Error ? err.message : String(err);
+                            this._post({ type: 'error', message: errMsg });
+                            void this.pushStateSync();
+                            break;
+                        }
+                        if (this._uiIsStreaming(tab)) {
+                            await this._abortActiveTab(tab);
+                        }
+                        this._startTurn(tab);
+                        tab.isStreaming = true;
+                        if (tab.id === this._activeTabId) {
+                            vscode.commands.executeCommand('setContext', 'pi-agent.isStreaming', true);
+                            this.sendStateSync();
+                        }
+                        try {
+                            await this._dispatchPrompt(tab, trimmed, attachments);
+                        } finally {
+                            if (!tab.session.session?.isStreaming) {
+                                tab.isStreaming = false;
+                                if (tab.id === this._activeTabId) {
+                                    vscode.commands.executeCommand(
+                                        'setContext',
+                                        'pi-agent.isStreaming',
+                                        false,
+                                    );
+                                }
+                            }
+                        }
+                        void this.pushStateSync();
+                    } finally {
+                        tab.suppressQueueDrain = false;
+                    }
                     break;
                 }
                 case 'editQueuedMessage':

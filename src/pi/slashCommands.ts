@@ -44,19 +44,14 @@ export async function tryHandleBuiltinSlashCommand(
         return false;
     }
 
-    const session = manager.session;
-    if (!session) {
-        vscode.window.showWarningMessage('Pi session is not ready yet.');
-        return true;
-    }
-
     const space = trimmed.indexOf(' ');
     const command = (space === -1 ? trimmed.slice(1) : trimmed.slice(1, space)).toLowerCase();
     const args = space === -1 ? '' : trimmed.slice(space + 1).trim();
 
-    // login/logout handled by Pi CLI (extension_ui_request dialogs over RPC)
-    if (command === 'login' || command === 'logout') {
-        return false;
+    const session = manager.session;
+    if (!session) {
+        vscode.window.showWarningMessage('Pi session is not ready yet.');
+        return true;
     }
 
     switch (command) {
@@ -95,13 +90,15 @@ export async function tryHandleBuiltinSlashCommand(
     }
 }
 
-/** Delegate auth to Pi CLI over RPC (same as typing /login in terminal). */
-export async function runPiLoginFlow(manager: PiChatSession): Promise<void> {
-    await manager.submitInput('/login', { mode: 'prompt' });
+/** Configure provider auth (chat /login and settings button). */
+export async function runPiLoginFlow(manager?: PiChatSession): Promise<void> {
+    const { runPiAuthLogin } = await import('./piAuthFlow');
+    await runPiAuthLogin(manager);
 }
 
-export async function runPiLogoutFlow(manager: PiChatSession): Promise<void> {
-    await manager.submitInput('/logout', { mode: 'prompt' });
+export async function runPiLogoutFlow(manager?: PiChatSession): Promise<void> {
+    const { runPiAuthLogout } = await import('./piAuthFlow');
+    await runPiAuthLogout(manager);
 }
 
 async function runResumeFlow(_manager: PiChatSession): Promise<void> {

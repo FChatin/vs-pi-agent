@@ -1,7 +1,22 @@
 import * as vscode from 'vscode';
+import { runPiAuthLogin, runPiAuthLogout } from './piAuthFlow';
 import type { PiChatSession } from './slashCommands';
 import { tryHandleBuiltinSlashCommand } from './slashCommands';
 import type { PiRpcSessionManager } from './rpcSession';
+
+/** Handled in VS Code only — must never be sent to Pi RPC as a prompt. */
+const VSCODE_ONLY_SLASH = new Set(['login', 'logout', 'test-error']);
+
+export function isSlashOnlyInput(text: string): boolean {
+    return text.trim().startsWith('/');
+}
+
+export function isVscodeOnlySlash(text: string): boolean {
+    if (!isSlashOnlyInput(text)) {
+        return false;
+    }
+    return VSCODE_ONLY_SLASH.has(parseSlash(text.trim()).command);
+}
 
 export type SettingsFocusSection =
     | 'mcp'
@@ -50,7 +65,18 @@ export async function tryHandleSlashCommand(manager: PiChatSession, text: string
         return false;
     }
 
-    const { command } = parseSlash(trimmed);
+    const { command, args } = parseSlash(trimmed);
+
+    if (VSCODE_ONLY_SLASH.has(command)) {
+        if (command === 'login') {
+            await runPiAuthLogin(manager);
+        } else if (command === 'logout') {
+            await runPiAuthLogout(manager);
+        } else if (command === 'test-error') {
+            runTestError(manager, args);
+        }
+        return true;
+    }
 
     const gui = GUI_SLASH[command];
     if (gui) {
@@ -76,8 +102,23 @@ export async function tryHandleSlashCommand(manager: PiChatSession, text: string
     return true;
 }
 
+function runTestError(manager: PiChatSession, args: string): void {
+    const rpc = manager as PiRpcSessionManager;
+    const msg =
+        args.trim() ||
+        'WriteIterableClosedError: WritableIterable is closed (test)';
+    rpc.postChatError(msg);
+    rpc.postChatError(
+        'Pi RPC process exited (code=7, signal=null). Stderr: … (test #2)',
+    );
+}
+
 /** Send slash to Pi RPC and wait for the CLI to finish handling it. */
 export async function runCliSlashCommand(manager: PiChatSession, text: string): Promise<void> {
+    if (isVscodeOnlySlash(text)) {
+        await tryHandleSlashCommand(manager, text);
+        return;
+    }
     const rpc = manager as PiRpcSessionManager;
     if (typeof rpc.runCliSlashCommand === 'function') {
         await rpc.runCliSlashCommand(text);

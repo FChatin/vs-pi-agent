@@ -20,7 +20,7 @@ import { RpcExtensionUiHandler } from './rpcExtensionUi';
 import type { PiAgentEvent, RpcExtensionUIRequest, RpcSessionStats } from './rpcTypes';
 import { readPlanModeInfoFromContext } from './planModeState';
 import { tryHandleBashPrefix } from './slashCommands';
-import { tryHandleSlashCommand } from './slashCommandRouter';
+import { isVscodeOnlySlash, tryHandleSlashCommand } from './slashCommandRouter';
 import { buildImplementPlanPrompt } from './planModeState';
 import type { ExtensionUiBridge } from './extensionUiBridge';
 import type { ToolApprovalHandler } from './types';
@@ -85,6 +85,7 @@ export class PiRpcSessionManager {
     private _cachedCommands: SlashCommandListItem[] = [];
     private _sessionStats: SessionTokenStats | undefined;
     private _extensionUiBridge: ExtensionUiBridge | undefined;
+    private _postChatError: ((message: string) => void) | undefined;
 
     constructor(outputChannel: vscode.OutputChannel) {
         this._outputChannel = outputChannel;
@@ -92,6 +93,10 @@ export class PiRpcSessionManager {
 
     get session(): RpcSessionShim | undefined {
         return this._shim;
+    }
+
+    getSessionTokenStats(): SessionTokenStats | undefined {
+        return this._sessionStats;
     }
 
     get isReady(): boolean {
@@ -104,6 +109,14 @@ export class PiRpcSessionManager {
 
     setExtensionUiBridge(_bridge: ExtensionUiBridge | undefined): void {
         this._extensionUiBridge = _bridge;
+    }
+
+    setPostChatError(fn: (message: string) => void): void {
+        this._postChatError = fn;
+    }
+
+    postChatError(message: string): void {
+        this._postChatError?.(message);
     }
 
     setToolApprovalHandler(_handler: ToolApprovalHandler | undefined): void {
@@ -296,6 +309,11 @@ export class PiRpcSessionManager {
     async runCliSlashCommand(text: string): Promise<void> {
         if (!this._bridge.isStarted) {
             throw new Error('Pi RPC not started');
+        }
+        const trimmed = text.trim();
+        if (isVscodeOnlySlash(trimmed)) {
+            await tryHandleSlashCommand(this, trimmed);
+            return;
         }
         let settled = false;
         const done = new Promise<void>((resolve) => {
@@ -544,11 +562,10 @@ export class PiRpcSessionManager {
             }
         }
 
-        if (this._shim?.isStreaming) {
-            await this._bridge.prompt(trimmed, undefined, 'steer');
-        } else {
-            await this._bridge.prompt(trimmed);
-        }
+        await this.submitInput(trimmed, {
+            mode: 'prompt',
+            streamingBehavior: 'steer',
+        });
         await this.syncFromRpc();
     }
 

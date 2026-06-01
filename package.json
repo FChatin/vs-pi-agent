@@ -2,7 +2,7 @@
   "name": "vscode-pi-agent",
   "displayName": "vscode-pi-agent",
   "description": "Pi coding agent in VS Code — sidebar GUI for `pi --mode rpc` (full CLI parity, no bundled SDK).",
-  "version": "0.2.40",
+  "version": "0.2.41",
   "publisher": "fchatin",
   "license": "MIT",
   "repository": {

@@ -80,8 +80,8 @@ function renderIoSection(st: SessionTokenStats | undefined): string {
     `;
 }
 
-/** Compact one-line stats for the input footer (bottom bar). */
-export function renderFooterTokenSummary(
+/** Compact one-line token summary for the VS Code status bar. */
+export function formatTokenSummaryText(
     contextUsage: ContextUsageInfo | undefined,
     sessionTokens: SessionTokenStats | undefined,
 ): string {
@@ -113,9 +113,5 @@ export function renderFooterTokenSummary(
         }
     }
 
-    if (parts.length === 0) {
-        return '';
-    }
-
-    return `<span class="footer-token-stats" title="Context window usage and session token totals">${parts.join(' · ')}</span>`;
+    return parts.join(' · ');
 }

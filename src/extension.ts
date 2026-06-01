@@ -120,6 +120,7 @@ export async function activate(context: vscode.ExtensionContext) {
             vscode.commands.registerCommand('pi-agent.selectModel', async () => {
                 await piSession?.showModelPicker();
                 sidebarProvider.sendStateSync();
+                statusBar.refresh();
             }),
 
             vscode.commands.registerCommand('pi-agent.toggleThinking', async () => {

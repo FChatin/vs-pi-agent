@@ -18,7 +18,6 @@ import type {
 import { dismissExtensionUi, initExtensionUiHost, showExtensionUiRequest } from './extensionUi';
 import { isImageFilePath, parseUserMessageForDisplay } from '../shared/attachmentMessageDisplay';
 import { shouldHideMessageInChat, stripPlanContentForChatDisplay } from '../shared/planMessageFilter';
-import { renderFooterTokenSummary } from './tokenStatsBar';
 import { renderComposerAttachmentChip, renderMessageAttachmentChip } from './attachmentChipHtml';
 import { bindChatFileDrop } from './chatFileDrop';
 import {
@@ -182,11 +181,6 @@ function handleMessage(msg: ServerMessage): void {
                 addToRecentModels(msg.current.provider, msg.current.id, msg.current.name);
             }
             if (msg.thinkingLevel) state.thinkingLevel = msg.thinkingLevel;
-            updateFooterModel();
-            if (pendingModelPicker) {
-                pendingModelPicker = false;
-                showModelPicker();
-            }
             break;
         case 'fileChange':
             state.fileChanges.push(msg.change);
@@ -322,8 +316,6 @@ function applyStateSync(s: SerializedAgentState): void {
         updateAttachmentsStrip();
         updateConnectionBanner();
         updatePlanPanel();
-        refreshFooterTokenStats();
-        updateFooterModel();
         if (state.isStreaming) {
             if (state.isThinking) {
                 setStreamPhase('thinking');
@@ -383,7 +375,6 @@ function handleAgentEvent(event: any): void {
                     contextWindow: event.usage.contextWindow ?? 0,
                     percent: event.usage.percent ?? null,
                 };
-                refreshFooterTokenStats();
             }
             break;
         case 'agent_start':
@@ -431,7 +422,6 @@ function handleAgentEvent(event: any): void {
             updateConnectionBanner();
             updateModeSwitch();
             updatePlanPanel();
-            refreshFooterTokenStats();
             break;
         }
         case 'auto_retry_start':
@@ -694,6 +684,7 @@ function appendChatMessageDom(msg: any, index: number): void {
     }
 
     markLatestUserMessageGroup();
+    bindUserPromptStickyCollapse();
     bindCopyButtons();
     bindCheckpointButtons();
     bindRedoButtons();
@@ -798,17 +789,14 @@ function render(): void {
     composerEditBanner.style.display = 'none';
     inputContainer.appendChild(composerEditBanner);
     const area = el('div', 'input-area');
-    area.innerHTML = `<textarea id="input" placeholder="Ask Pi anything..." rows="1"></textarea>`;
-    inputContainer.appendChild(area);
-    const footer = el('div', 'input-footer');
-    footer.innerHTML = `
+    area.innerHTML = `
         <div class="composer-toolbar">
             <div class="composer-toolbar-left">
                 <button id="btn-attach" class="composer-action-btn composer-action-btn--ghost" type="button" title="Attach files · @ paths · Shift+drop from Explorer">
                     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13.5 8.5L7.2 14.8a3.5 3.5 0 01-5-5l6.8-6.8a2.5 2.5 0 013.5 3.5L5.7 12.3a1.5 1.5 0 01-2.1-2.1l6.1-6.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
                 </button>
-                <span class="footer-model" title="Change model">Model</span>
             </div>
+            <textarea id="input" placeholder="Ask Pi anything..." rows="1"></textarea>
             <div class="composer-toolbar-right">
                 <button id="btn-steer" class="composer-action-btn composer-action-btn--ghost" type="button" title="Steer (Ctrl+Enter)" hidden>
                     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 10l4-4 4 4" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -819,7 +807,7 @@ function render(): void {
                 </button>
             </div>
         </div>`;
-    inputContainer.appendChild(footer);
+    inputContainer.appendChild(area);
     app.appendChild(inputContainer);
 
     // Bind stable event listeners (these elements persist for the lifetime of the skeleton)
@@ -972,6 +960,125 @@ function markLatestUserMessageGroup(): void {
     const groups = document.querySelectorAll('.message-group-user');
     const last = groups[groups.length - 1];
     last?.classList.add('message-group-user--latest');
+}
+
+const USER_PROMPT_STICKY_LINE_CLAMP = 3;
+
+type UserPromptCollapseState = { expanded: boolean; clampable: boolean };
+
+let userPromptStickyObserver: IntersectionObserver | null = null;
+const userPromptCollapseByGroup = new WeakMap<HTMLElement, UserPromptCollapseState>();
+
+function teardownUserPromptStickyCollapse(): void {
+    userPromptStickyObserver?.disconnect();
+    userPromptStickyObserver = null;
+}
+
+function userPromptContentNeedsClamp(content: HTMLElement): boolean {
+    const lineHeight = parseFloat(getComputedStyle(content).lineHeight);
+    const maxHeight =
+        Number.isFinite(lineHeight) && lineHeight > 0
+            ? lineHeight * USER_PROMPT_STICKY_LINE_CLAMP
+            : 52;
+    return content.scrollHeight > maxHeight + 4;
+}
+
+function applyUserPromptCollapse(group: HTMLElement, collapseState: UserPromptCollapseState): void {
+    const stuck = group.classList.contains('user-prompt-stuck');
+    const collapsed = stuck && !collapseState.expanded;
+    const content = group.querySelector('.message-content') as HTMLElement | null;
+    const attachments = group.querySelector('.message-attachments') as HTMLElement | null;
+    const toggle = group.querySelector('.user-prompt-expand-toggle') as HTMLButtonElement | null;
+
+    content?.classList.toggle('user-prompt-text--collapsed', collapsed);
+    attachments?.classList.toggle('user-prompt-attachments--hidden', collapsed);
+    group.classList.toggle('user-prompt-expanded', collapseState.expanded);
+    if (toggle) {
+        toggle.textContent = collapseState.expanded ? 'Show less' : 'Show more';
+        toggle.setAttribute('aria-expanded', collapseState.expanded ? 'true' : 'false');
+    }
+}
+
+function updateUserPromptStickyState(group: HTMLElement, stuck: boolean): void {
+    group.classList.toggle('user-prompt-stuck', stuck);
+    const collapseState = userPromptCollapseByGroup.get(group);
+    if (!collapseState) {
+        return;
+    }
+    if (!stuck) {
+        collapseState.expanded = false;
+    }
+    applyUserPromptCollapse(group, collapseState);
+}
+
+function bindUserPromptStickyCollapse(): void {
+    const container = document.getElementById('messages');
+    if (!container) {
+        return;
+    }
+
+    teardownUserPromptStickyCollapse();
+    userPromptStickyObserver = new IntersectionObserver(
+        (entries) => {
+            for (const entry of entries) {
+                const sentinel = entry.target as HTMLElement;
+                const group = sentinel.nextElementSibling;
+                if (!(group instanceof HTMLElement) || !group.classList.contains('message-group-user')) {
+                    continue;
+                }
+                updateUserPromptStickyState(group, !entry.isIntersecting);
+            }
+        },
+        { root: container, threshold: [0] },
+    );
+
+    document.querySelectorAll('.chat-turn').forEach((turnNode) => {
+        const turn = turnNode as HTMLElement;
+        const group = turn.querySelector('.message-group-user') as HTMLElement | null;
+        if (!group) {
+            return;
+        }
+
+        const content = group.querySelector('.message-content') as HTMLElement | null;
+        turn.querySelector('.user-sticky-sentinel')?.remove();
+        group.querySelector('.user-prompt-expand-toggle')?.remove();
+        group.classList.remove('user-prompt-clampable', 'user-prompt-stuck', 'user-prompt-expanded');
+        content?.classList.remove('user-prompt-text--collapsed');
+        group.querySelector('.message-attachments')?.classList.remove('user-prompt-attachments--hidden');
+
+        if (!content || !userPromptContentNeedsClamp(content)) {
+            userPromptCollapseByGroup.delete(group);
+            return;
+        }
+
+        const collapseState: UserPromptCollapseState = { expanded: false, clampable: true };
+        userPromptCollapseByGroup.set(group, collapseState);
+        group.classList.add('user-prompt-clampable');
+
+        const sentinel = el('div', 'user-sticky-sentinel');
+        turn.insertBefore(sentinel, group);
+        userPromptStickyObserver!.observe(sentinel);
+
+        const toggle = el('button', 'user-prompt-expand-toggle') as HTMLButtonElement;
+        toggle.type = 'button';
+        toggle.setAttribute('aria-expanded', 'false');
+        toggle.textContent = 'Show more';
+        toggle.addEventListener('click', (event) => {
+            event.stopPropagation();
+            event.preventDefault();
+            const state = userPromptCollapseByGroup.get(group);
+            if (!state) {
+                return;
+            }
+            state.expanded = !state.expanded;
+            applyUserPromptCollapse(group, state);
+        });
+        group.querySelector('.user-prompt-card')?.appendChild(toggle);
+
+        const containerRect = container.getBoundingClientRect();
+        const stuckNow = sentinel.getBoundingClientRect().bottom <= containerRect.top + 1;
+        updateUserPromptStickyState(group, stuckNow);
+    });
 }
 
 function updateMessages(): void {
@@ -1146,6 +1253,7 @@ function updateMessages(): void {
     }
 
     markLatestUserMessageGroup();
+    bindUserPromptStickyCollapse();
 
     bindCopyButtons();
     bindCheckpointButtons();
@@ -1208,28 +1316,6 @@ function hasSendableInput(text: string): boolean {
     return Boolean(text.trim()) || state.pendingAttachments.length > 0;
 }
 
-/** Update token stats in the input footer only (no duplicate top bar). */
-function refreshFooterTokenStats(): void {
-    const footer = document.querySelector('.input-footer');
-    if (!footer) {
-        return;
-    }
-    const html = renderFooterTokenSummary(state.contextUsage, state.sessionTokens);
-    const existing = footer.querySelector('.footer-token-stats');
-    if (!html.trim()) {
-        existing?.remove();
-        return;
-    }
-    if (existing) {
-        existing.outerHTML = html;
-        return;
-    }
-    const modelEl = footer.querySelector('.footer-model');
-    if (modelEl) {
-        modelEl.insertAdjacentHTML('afterend', html);
-    }
-}
-
 function updateAttachmentsStrip(): void {
     const strip = document.getElementById('attachments-strip');
     const container = document.querySelector('.input-container');
@@ -1274,9 +1360,9 @@ function updateComposerToolbar(): void {
     }
     if (sendBtn) {
         const showStop = state.isStreaming && !composerEdit && !canSend;
-        const showQueue = state.isStreaming && !composerEdit && canSend;
+        const showInterruptSend = state.isStreaming && !composerEdit && canSend;
         sendBtn.classList.toggle('composer-action-btn--as-stop', showStop);
-        sendBtn.classList.toggle('composer-action-btn--as-queue', showQueue);
+        sendBtn.classList.toggle('composer-action-btn--as-queue', showInterruptSend);
         const sendIcon = sendBtn.querySelector('.composer-btn-icon--send') as HTMLElement | null;
         const stopIcon = sendBtn.querySelector('.composer-btn-icon--stop') as HTMLElement | null;
         if (sendIcon) {
@@ -1291,9 +1377,9 @@ function updateComposerToolbar(): void {
         } else if (showStop) {
             sendBtn.title = 'Stop (Esc)';
             sendBtn.setAttribute('aria-label', 'Stop generation');
-        } else if (showQueue) {
-            sendBtn.title = 'Queue message (Enter)';
-            sendBtn.setAttribute('aria-label', 'Queue message while Pi is working');
+        } else if (showInterruptSend) {
+            sendBtn.title = 'Send now (interrupt current work)';
+            sendBtn.setAttribute('aria-label', 'Send now and interrupt current work');
         } else {
             sendBtn.title = 'Send (Enter)';
             sendBtn.setAttribute('aria-label', 'Send message');
@@ -1302,6 +1388,34 @@ function updateComposerToolbar(): void {
         sendBtn.toggleAttribute('disabled', disabled);
         sendBtn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
     }
+}
+
+function submitWhileStreaming(mode: 'queue' | 'interrupt'): void {
+    const input = document.getElementById('input') as HTMLTextAreaElement | null;
+    const text = input?.value.trim() ?? '';
+    if (!hasSendableInput(text)) {
+        return;
+    }
+    const attachmentCount = state.pendingAttachments.length;
+    const slashOnly = attachmentCount === 0 && text.startsWith('/');
+    state.pendingAttachments = [];
+    updateAttachmentsStrip();
+    if (slashOnly) {
+        vscode.postMessage({ type: 'slashCommand', text });
+    } else {
+        if (text || attachmentCount > 0) {
+            appendOptimisticUserMessage(text, attachmentCount);
+        }
+        vscode.postMessage({
+            type: mode === 'interrupt' ? 'interruptAndSend' : 'queueMessage',
+            text,
+        });
+    }
+    if (input) {
+        input.value = '';
+        input.style.height = 'auto';
+    }
+    updateComposerToolbar();
 }
 
 function requestAbort(): void {
@@ -1322,18 +1436,7 @@ function handleSendButtonClick(): void {
     if (state.isStreaming) {
         const text = input?.value.trim() ?? '';
         if (hasSendableInput(text)) {
-            const attachmentCount = state.pendingAttachments.length;
-            if (text || attachmentCount > 0) {
-                appendOptimisticUserMessage(text, attachmentCount);
-            }
-            state.pendingAttachments = [];
-            updateAttachmentsStrip();
-            vscode.postMessage({ type: 'queueMessage', text });
-            if (input) {
-                input.value = '';
-                input.style.height = 'auto';
-            }
-            updateComposerToolbar();
+            submitWhileStreaming('interrupt');
         } else {
             requestAbort();
         }
@@ -1363,7 +1466,7 @@ function updateInputArea(): void {
         input.placeholder = composerEdit
             ? 'Enter = send as new · ⌘↵ = fork & send · Esc = cancel'
             : state.isStreaming
-            ? 'Queue with Enter · Ctrl+Enter steer · Esc or ■ button to stop...'
+            ? 'Enter to queue · ↑ send now · Ctrl+Enter steer · Esc stop...'
             : state.planMode.enabled
               ? 'Plan mode: describe what to build (read-only until you implement)...'
               : 'Ask Pi anything...';
@@ -1400,7 +1503,7 @@ function updateConnectionBanner(): void {
             ? `Reconnecting${attemptLabel}…`
             : 'Connection failed';
 
-    const detail = cs.message ? escHtml(truncate(cs.message, 200)) : '';
+    const detailText = cs.message ? truncate(cs.message, 200) : '';
 
     let banner = existing;
     if (!banner) {
@@ -1416,13 +1519,31 @@ function updateConnectionBanner(): void {
         banner.className = `connection-banner connection-banner-${cs.phase}`;
     }
 
-    banner.innerHTML =
-        cs.phase === 'retrying'
-            ? `<span class="connection-banner-spinner"></span>
-               <span class="connection-banner-title">${escHtml(title)}</span>
-               ${detail ? `<span class="connection-banner-detail">${detail}</span>` : ''}`
-            : `<span class="connection-banner-title">${escHtml(title)}</span>
-               ${detail ? `<span class="connection-banner-detail">${detail}</span>` : ''}`;
+    banner.replaceChildren();
+
+    if (cs.phase === 'retrying') {
+        banner.append(
+            el('span', 'connection-banner-spinner'),
+            Object.assign(el('span', 'connection-banner-title'), { textContent: title }),
+        );
+        if (detailText) {
+            const detailEl = el('span', 'connection-banner-detail');
+            detailEl.textContent = detailText;
+            banner.append(detailEl);
+        }
+        return;
+    }
+
+    banner.append(Object.assign(el('span', 'connection-banner-title'), { textContent: title }));
+    if (detailText) {
+        const detailEl = el('span', 'connection-banner-detail');
+        detailEl.textContent = detailText;
+        banner.append(detailEl);
+    }
+    appendDismissButton(banner, 'connection-banner-dismiss', () => {
+        state.connectionStatus = { phase: 'idle' };
+        updateConnectionBanner();
+    });
 }
 
 let queuedEditingIndex = -1;
@@ -1602,7 +1723,7 @@ function buildWelcome(): HTMLElement {
             <div class="welcome-hint">Type a message to start</div>
             <div class="welcome-hint"><kbd>Ctrl+Shift+L</kbd> Focus chat</div>
             <div class="welcome-hint"><kbd>Ctrl+Shift+N</kbd> New session</div>
-            <div class="welcome-hint"><kbd>Enter</kbd> Send · while running, same button stops</div>
+            <div class="welcome-hint"><kbd>Enter</kbd> Send · while running, <kbd>Enter</kbd> queue · ↑ interrupt</div>
         </div>
     `;
     return w;
@@ -3101,27 +3222,6 @@ function buildThinkingBlock(
     return details;
 }
 
-// ── Model picker popup ──
-
-let pendingModelPicker = false;
-
-function toggleModelPicker(): void {
-    const existing = document.getElementById('model-picker');
-    if (existing) {
-        existing.remove();
-        pendingModelPicker = false;
-        return;
-    }
-
-    if (state.availableModels.length === 0) {
-        pendingModelPicker = true;
-        vscode.postMessage({ type: 'getModels' });
-        return;
-    }
-
-    showModelPicker();
-}
-
 function addToRecentModels(provider: string, id: string, name?: string): void {
     state.recentModels = state.recentModels.filter(
         m => !(m.id === id && m.provider === provider)
@@ -3132,136 +3232,22 @@ function addToRecentModels(provider: string, id: string, name?: string): void {
     }
 }
 
-function buildModelItem(m: any): HTMLElement {
-    const item = el('div', 'model-item');
-    const isActive = state.model && m.id === state.model.id && m.provider === state.model.provider;
-    if (isActive) item.classList.add('active');
-    item.dataset.provider = m.provider;
-    item.dataset.modelId = m.id;
-    item.dataset.name = (m.name ?? m.id).toLowerCase();
-    item.innerHTML = `
-        <span class="model-item-check">${isActive ? '&#10003;' : ''}</span>
-        <span class="model-item-name">${escHtml(m.name ?? m.id)}</span>
-    `;
-    return item;
-}
-
-function showModelPicker(): void {
-    const existing = document.getElementById('model-picker');
-    if (existing) existing.remove();
-
-    const container = document.querySelector('.input-container');
-    if (!container) return;
-
-    const picker = el('div', 'model-picker');
-    picker.id = 'model-picker';
-
-    const searchInput = document.createElement('input');
-    searchInput.className = 'model-search';
-    searchInput.placeholder = 'Search models...';
-    searchInput.type = 'text';
-    picker.appendChild(searchInput);
-
-    const list = el('div', 'model-list');
-
-    if (state.recentModels.length > 0) {
-        const recentHeader = el('div', 'model-section-header');
-        recentHeader.textContent = 'Recent';
-        list.appendChild(recentHeader);
-
-        for (const r of state.recentModels) {
-            const full = state.availableModels.find(
-                m => m.id === r.id && m.provider === r.provider
-            );
-            if (full) {
-                list.appendChild(buildModelItem(full));
-            }
-        }
-
-        const allHeader = el('div', 'model-section-header');
-        allHeader.textContent = 'All Models';
-        list.appendChild(allHeader);
-    }
-
-    for (const m of state.availableModels) {
-        list.appendChild(buildModelItem(m));
-    }
-    picker.appendChild(list);
-
-    const thinkingRow = el('div', 'thinking-chips');
-    const thinkingLabel = el('span', 'thinking-label');
-    thinkingLabel.textContent = 'Thinking:';
-    thinkingRow.appendChild(thinkingLabel);
-    const levels = ['off', 'minimal', 'low', 'medium', 'high'];
-    for (const level of levels) {
-        const chip = el('button', `thinking-chip${level === state.thinkingLevel ? ' active' : ''}`);
-        chip.textContent = level.charAt(0).toUpperCase() + level.slice(1);
-        chip.dataset.level = level;
-        thinkingRow.appendChild(chip);
-    }
-    picker.appendChild(thinkingRow);
-
-    container.appendChild(picker);
-
-    searchInput.focus();
-
-    searchInput.addEventListener('input', () => {
-        const q = searchInput.value.toLowerCase();
-        list.querySelectorAll('.model-item').forEach((item) => {
-            const name = (item as HTMLElement).dataset.name ?? '';
-            (item as HTMLElement).style.display = name.includes(q) ? '' : 'none';
-        });
-        list.querySelectorAll('.model-section-header').forEach((hdr) => {
-            (hdr as HTMLElement).style.display = q ? 'none' : '';
-        });
+function appendDismissButton(
+    container: HTMLElement,
+    className: string,
+    onDismiss: () => void,
+): HTMLButtonElement {
+    const closeBtn = el('button', className);
+    closeBtn.type = 'button';
+    closeBtn.innerHTML = '&times;';
+    closeBtn.title = 'Dismiss';
+    closeBtn.setAttribute('aria-label', 'Dismiss');
+    closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        onDismiss();
     });
-
-    list.addEventListener('click', (e) => {
-        const item = (e.target as HTMLElement).closest('.model-item') as HTMLElement | null;
-        if (!item) return;
-        const provider = item.dataset.provider!;
-        const modelId = item.dataset.modelId!;
-        vscode.postMessage({ type: 'setModel', provider, modelId });
-        const matched = state.availableModels.find(m => m.id === modelId && m.provider === provider);
-        if (matched) {
-            state.model = { provider, id: modelId, name: matched.name ?? modelId };
-            addToRecentModels(provider, modelId, matched.name ?? modelId);
-        }
-        updateFooterModel();
-        closeModelPicker();
-    });
-
-    thinkingRow.addEventListener('click', (e) => {
-        const chip = (e.target as HTMLElement).closest('.thinking-chip') as HTMLElement | null;
-        if (!chip) return;
-        vscode.postMessage({ type: 'setThinkingLevel', level: chip.dataset.level! });
-        thinkingRow.querySelectorAll('.thinking-chip').forEach(c => c.classList.remove('active'));
-        chip.classList.add('active');
-        state.thinkingLevel = chip.dataset.level;
-    });
-
-    setTimeout(() => {
-        document.addEventListener('click', onClickOutsidePicker);
-    }, 0);
-}
-
-function onClickOutsidePicker(e: MouseEvent): void {
-    const picker = document.getElementById('model-picker');
-    if (picker && !picker.contains(e.target as Node)) {
-        closeModelPicker();
-    }
-}
-
-function closeModelPicker(): void {
-    document.getElementById('model-picker')?.remove();
-    document.removeEventListener('click', onClickOutsidePicker);
-}
-
-function updateFooterModel(): void {
-    const el = document.querySelector('.footer-model');
-    if (el) {
-        el.textContent = state.model?.name ?? state.model?.id ?? '';
-    }
+    container.appendChild(closeBtn);
+    return closeBtn;
 }
 
 function showError(message: string): void {
@@ -3276,7 +3262,12 @@ function showError(message: string): void {
         return;
     }
     const errEl = el('div', 'error-message');
-    errEl.textContent = message;
+    const textEl = el('span', 'error-message-text');
+    textEl.textContent = message;
+    errEl.appendChild(textEl);
+    appendDismissButton(errEl, 'error-message-dismiss', () => {
+        errEl.remove();
+    });
     container.appendChild(errEl);
     scrollToBottom();
 }
@@ -3383,12 +3374,12 @@ function bindStableEvents(): void {
                 if (hasSendableInput(text)) {
                     if (e.ctrlKey || e.metaKey) {
                         vscode.postMessage({ type: 'steer', text });
+                        input.value = '';
+                        input.style.height = 'auto';
+                        updateComposerToolbar();
                     } else {
-                        vscode.postMessage({ type: 'queueMessage', text });
+                        submitWhileStreaming('queue');
                     }
-                    input.value = '';
-                    input.style.height = 'auto';
-                    updateComposerToolbar();
                 }
             } else {
                 sendMessage();
@@ -3413,7 +3404,7 @@ function bindStableEvents(): void {
         }
     });
 
-    document.querySelector('.input-footer')?.addEventListener('click', (e) => {
+    document.querySelector('.input-area')?.addEventListener('click', (e) => {
         const target = e.target as HTMLElement;
         if (target.closest('#btn-attach')) {
             e.preventDefault();
@@ -3430,10 +3421,6 @@ function bindStableEvents(): void {
             e.preventDefault();
             handleSteerButtonClick();
             return;
-        }
-        if (target.closest('.footer-model')) {
-            e.stopPropagation();
-            toggleModelPicker();
         }
     });
 
@@ -3585,6 +3572,12 @@ function sendMessage(): void {
     updateAttachmentsStrip();
     userHasScrolled = false;
     updateScrollButton();
+    const slashOnly = attachmentCount === 0 && text.startsWith('/');
+    if (slashOnly) {
+        vscode.postMessage({ type: 'slashCommand', text });
+        updateComposerToolbar();
+        return;
+    }
     if (text || attachmentCount > 0) {
         appendOptimisticUserMessage(text, attachmentCount);
     }
@@ -3714,8 +3707,7 @@ function executeSlashCommand(index: number): void {
     hideSlashMenu();
     userHasScrolled = false;
     updateScrollButton();
-    appendOptimisticUserMessage(entry.invocation, 0);
-    vscode.postMessage({ type: 'prompt', text: entry.invocation });
+    vscode.postMessage({ type: 'slashCommand', text: entry.invocation });
 }
 
 function selectSlashItem(index: number): void {

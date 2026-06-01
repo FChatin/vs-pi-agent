@@ -295,19 +295,11 @@ export class SettingsPanel {
     }
 
     private async _runPiLogin(): Promise<void> {
-        if (!this._piSession) {
-            this._post({ type: 'error', message: 'No active Pi session. Open the chat sidebar and try again.' });
-            return;
-        }
         await runPiLoginFlow(this._piSession);
         await this._sendSettings();
     }
 
     private async _runPiLogout(): Promise<void> {
-        if (!this._piSession) {
-            this._post({ type: 'error', message: 'No active Pi session. Open the chat sidebar and try again.' });
-            return;
-        }
         await runPiLogoutFlow(this._piSession);
         await this._sendSettings();
     }

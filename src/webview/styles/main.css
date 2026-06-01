@@ -875,6 +875,50 @@ body {
     margin-top: 0;
 }
 
+.user-sticky-sentinel {
+    height: 1px;
+    width: 100%;
+    pointer-events: none;
+    visibility: hidden;
+}
+
+.message-user .message-content.user-prompt-text--collapsed {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+}
+
+.user-prompt-attachments--hidden {
+    display: none;
+}
+
+.user-prompt-expand-toggle {
+    display: none;
+    width: 100%;
+    margin: 0;
+    padding: 4px 12px 8px;
+    border: none;
+    border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+    background: transparent;
+    color: var(--link);
+    font: inherit;
+    font-size: 10.5px;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+}
+
+.user-prompt-expand-toggle:hover {
+    color: color-mix(in srgb, var(--link) 80%, var(--fg));
+    background: color-mix(in srgb, var(--fg) 3%, transparent);
+}
+
+.message-group-user.user-prompt-stuck.user-prompt-clampable .user-prompt-expand-toggle,
+.message-group-user.user-prompt-clampable.user-prompt-expanded .user-prompt-expand-toggle {
+    display: block;
+}
+
 .message-assistant {
     padding: 0;
 }
@@ -896,7 +940,7 @@ body {
     margin-top: 0;
 }
 
-/* Hide bulky user footers — token stats live in composer footer */
+/* Hide bulky user footers — token stats live in the VS Code status bar */
 .message-group-user > .message-footer {
     display: none;
 }
@@ -1656,20 +1700,32 @@ body {
 
 /* ── Input ── */
 .input-area {
-    padding: 10px 12px 4px;
+    padding: 8px 10px 6px;
+}
+
+.input-area .composer-toolbar {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+}
+
+.input-area .composer-toolbar-left,
+.input-area .composer-toolbar-right {
+    flex-shrink: 0;
 }
 
 #input {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     background: transparent;
     color: var(--input-fg);
     border: none;
-    padding: 0;
+    padding: 5px 0;
     font-family: inherit;
     font-size: var(--chat-font);
     resize: none;
     outline: none;
-    min-height: 20px;
+    min-height: 28px;
     max-height: 140px;
     line-height: var(--chat-line);
     scrollbar-width: none;
@@ -1680,7 +1736,7 @@ body {
 
 /* ── Attachments (composer + sent messages) ── */
 .input-container.has-attachments .input-area {
-    padding-top: 6px;
+    padding-top: 4px;
 }
 
 .attachments-strip {
@@ -1857,26 +1913,12 @@ body {
     color: var(--fg);
 }
 
-/* ── Input footer ── */
-.input-footer {
-    padding: 0;
-}
-
-.composer-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 6px 8px 8px;
-    border-top: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
-}
-
+/* ── Composer toolbar (inside input area) ── */
 .composer-toolbar-left,
 .composer-toolbar-right {
     display: flex;
     align-items: center;
     gap: 6px;
-    min-width: 0;
 }
 
 .composer-toolbar-right {
@@ -1984,37 +2026,6 @@ body {
 
 .composer-btn-icon[hidden] {
     display: none !important;
-}
-
-.footer-model {
-    font-size: 10px;
-    color: var(--muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 100px;
-    flex-shrink: 1;
-    cursor: pointer;
-    transition: color 0.15s;
-    padding: 2px 6px;
-    border-radius: 5px;
-}
-.footer-model:hover {
-    color: var(--fg);
-    background: color-mix(in srgb, var(--fg) 5%, transparent);
-}
-
-.footer-token-stats {
-    font-size: 9.5px;
-    font-variant-numeric: tabular-nums;
-    color: var(--muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: min(360px, 50vw);
-    flex-shrink: 1;
-    padding-left: 6px;
-    border-left: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
 }
 
 .footer-drop-tip,
@@ -2462,12 +2473,39 @@ body {
 
 /* ── Error ── */
 .error-message {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
     padding: 8px 12px;
     color: var(--error-fg);
     font-size: 12px;
     background: rgba(244, 135, 113, 0.08);
     border-left: 3px solid var(--error-fg);
     margin: 4px 0;
+}
+.error-message-text {
+    flex: 1;
+    min-width: 0;
+    word-break: break-word;
+}
+.error-message-dismiss,
+.connection-banner-dismiss {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 2px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    margin-left: auto;
+    transition: background 0.15s, color 0.15s;
+}
+.error-message-dismiss:hover,
+.connection-banner-dismiss:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--fg);
 }
 
 .message-error {
@@ -2485,7 +2523,7 @@ body {
 /* ── Connection / retry banner (above composer) ── */
 .connection-banner {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 8px;
     padding: 8px 14px;
     border-bottom: 1px solid var(--border);

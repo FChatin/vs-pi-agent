@@ -291,6 +291,7 @@ export interface WorkspaceFileMatch {
 // Webview -> Extension messages
 export type ClientMessage =
     | { type: 'prompt'; text: string; attachments?: any[] }
+    | { type: 'slashCommand'; text: string }
     | { type: 'steer'; text: string }
     | { type: 'pickAttachments' }
     | { type: 'addPastedImages'; items: { mimeType: string; dataBase64: string; name?: string }[] }
@@ -328,6 +329,7 @@ export type ClientMessage =
     | { type: 'getSkills' }
     | { type: 'getSlashCommands' }
     | { type: 'queueMessage'; text: string }
+    | { type: 'interruptAndSend'; text: string }
     | { type: 'editQueuedMessage'; index: number; text: string }
     | { type: 'removeQueuedMessage'; index: number }
     | { type: 'cancelQueue' }

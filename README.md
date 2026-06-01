@@ -73,13 +73,3 @@ Extension writes to `~/.pi/agent/settings.json` (same as CLI). Sessions, skills,
 2. Install extension: **Install from VSIX** in VS Code Extensions
 3. Set provider: `/login` or Settings → **Configure provider**
 4. Start chatting
-
-## Version history
-
-### v0.2.40
-- Pi CLI RPC mode (Pi CLI required, no SDK bundling)
-- Settings panel with auth flow, thinking level, MCP import
-- Diff & undo per file-edit turn
-- Checkpoint & rollback per conversation turn
-- Plan mode with VS Code document integration
-- MCP config import from Cursor / Zed / VS Code

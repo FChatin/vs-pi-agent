@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { PiChatSession } from '../pi/slashCommands';
+import { formatTokenSummaryText } from '../webview/tokenStatsBar';
 
 export class StatusBarManager implements vscode.Disposable {
     private _item: vscode.StatusBarItem;
@@ -19,12 +20,17 @@ export class StatusBarManager implements vscode.Disposable {
                 event.type === 'agent_end' ||
                 event.type === 'message_end' ||
                 event.type === 'turn_end' ||
+                event.type === 'context_usage' ||
                 event.type === 'auto_retry_start' ||
                 event.type === 'auto_retry_end'
             ) {
                 this._update();
             }
         });
+    }
+
+    refresh(): void {
+        this._update();
     }
 
     private _update(): void {
@@ -42,23 +48,36 @@ export class StatusBarManager implements vscode.Disposable {
             isRetrying && agentSession && agentSession.retryAttempt > 0
                 ? ` (reconnecting ${agentSession.retryAttempt})`
                 : '';
-        this._item.text = `${icon} vs-pi-agent: ${name}${retrySuffix}`;
-
         const usage = this._session.session?.getContextUsage?.();
-        const parts: string[] = ['vs-pi-agent'];
+        const statsText = formatTokenSummaryText(usage, this._session.getSessionTokenStats());
+        const modelLabel = `${icon} vs-pi-agent: ${name}${retrySuffix}`;
+        this._item.text = statsText ? `${modelLabel} · ${statsText}` : modelLabel;
+
+        const tooltipParts: string[] = ['vs-pi-agent'];
         if (usage) {
             if (usage.tokens !== null) {
-                parts.push(`Context: ${usage.tokens.toLocaleString()} / ${usage.contextWindow.toLocaleString()} tokens`);
+                tooltipParts.push(
+                    `Context: ${usage.tokens.toLocaleString()} / ${usage.contextWindow.toLocaleString()} tokens`,
+                );
             }
             if (usage.percent !== null) {
-                parts.push(`Usage: ${Math.round(usage.percent)}%`);
+                tooltipParts.push(`Usage: ${Math.round(usage.percent)}%`);
+            }
+        }
+        const sessionTokens = this._session.getSessionTokenStats();
+        if (sessionTokens) {
+            tooltipParts.push(
+                `Session in/out: ${sessionTokens.input.toLocaleString()} / ${sessionTokens.output.toLocaleString()}`,
+            );
+            if (sessionTokens.cost > 0) {
+                tooltipParts.push(`Cost: $${sessionTokens.cost.toFixed(4)}`);
             }
         }
         const thinking = this._session.getThinkingLevel();
         if (thinking) {
-            parts.push(`Thinking: ${thinking}`);
+            tooltipParts.push(`Thinking: ${thinking}`);
         }
-        this._item.tooltip = parts.join('\n');
+        this._item.tooltip = tooltipParts.join('\n');
     }
 
     dispose(): void {
