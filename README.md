@@ -1,35 +1,37 @@
 # vs-pi-agent
 
-Pi coding agent in VS Code — sidebar chat, tools, multi-tab sessions, diffs, checkpoints, and sync with `~/.pi/agent`.
+Pi coding agent in VS Code — sidebar chat, multi-tab sessions, diffs, checkpoints, and full Pi CLI integration.
 
 **Repository:** [github.com/FChatin/vs-pi-agent](https://github.com/FChatin/vs-pi-agent)
 
-## Pi CLI: optional, not required
+## How it works
 
-The extension bundles the Pi SDK (`@earendil-works/pi-coding-agent`). It does **not** shell out to the `pi` terminal command.
+The extension spawns the Pi CLI as a local subprocess and communicates with it over **stdin/stdout JSONL RPC**. No bundled SDK — everything runs through the real CLI.
 
-You can use vs-pi-agent on a machine with **no Pi CLI installed**. Auth, settings, packages, skills, and sessions still live under `~/.pi/agent` (default).
-
-Installing [Pi CLI](https://github.com/badlogic/pi-mono) separately is **recommended** if you also want the terminal TUI, or to share the same config between VS Code and the shell.
+```
+VS Code ←→ Extension (TypeScript) ←→ RPC bridge ←→ pi CLI subprocess
+                                                     ↳ reads ~/.pi/agent/config
+                                                     ↳ reads ~/.pi/agent/auth.json
+                                                     ↳ writes session logs to ~/.pi/agent/sessions/
+```
 
 ## Requirements
 
+- [Pi CLI](https://github.com/badlogic/pi-mono) installed and on PATH
 - VS Code 1.100+
-- Node.js 18+ — only needed when installing Pi packages via npm (recommended packages, MCP adapter, plan mode)
 - Model provider credentials — see [Authentication](#authentication)
 
 ## Quick start
 
 1. Install the extension (VSIX or development build below).
-2. Open the **vs-pi-agent** sidebar.
-3. Configure a provider:
+2. Make sure `pi` is installed: `npm install -g @earendil-works/pi-coding-agent` (or any Pi CLI package)
+3. Open the **vs-pi-agent** sidebar.
+4. Configure a provider:
    - **Settings → Configure provider (/login)**, or
    - type `/login` in chat, or
    - Command Palette → **vs-pi-agent: Login (/login)**
-4. Pick a model from the status bar or with `/model`.
-5. Start chatting.
-
-On first launch you may be prompted to install [recommended Pi packages](#recommended-packages) (plan mode, MCP). Node.js/npm must be available for that step.
+5. Pick a model from the status bar or with `/model`.
+6. Start chatting.
 
 ## Authentication
 
@@ -43,36 +45,17 @@ Credentials are stored in `~/.pi/agent/auth.json` (same file Pi CLI uses). The e
 | **Manual** | Settings → **Open auth.json**, or edit the file directly |
 | **Environment** | e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` |
 
-OAuth subscriptions (Claude Pro/Max, ChatGPT Codex, GitHub Copilot) work through the same `/login` flow — browser auth opens from VS Code.
-
-After login, use **Reload session** in settings (or `/reload` in chat) if models do not appear immediately.
-
 ## Configuration
 
-By default **Use Pi CLI configuration** (`pi-agent.syncWithPiCli`) is enabled: the extension reads and writes `~/.pi/agent` — `settings.json`, `auth.json`, `mcp.json`, packages, skills, and sessions.
+**Use Pi CLI configuration** (`pi-agent.syncWithPiCli`) is enabled by default. The extension reads and writes `~/.pi/agent` — `settings.json`, `auth.json`, `mcp.json`, packages, skills, and sessions.
 
 Open **vs-pi-agent: Open Settings** to manage:
 
-- Default provider and model (`settings.json`)
+- Default provider and model
 - Pi packages (`npm:…` installs into `~/.pi/agent`)
 - Extension and skill paths
 - MCP servers (requires `pi-mcp-adapter` package)
 - Tool auto-approve and session options
-
-Turn off Pi CLI sync for extension-only VS Code settings (`pi-agent.apiProvider`, SecretStorage API keys, custom session path). Auth for the agent runtime still resolves from `auth.json` and environment variables.
-
-## Recommended packages
-
-Not bundled in the VSIX. Install into `~/.pi/agent` (same as `pi install`):
-
-| Package | Purpose |
-|---------|---------|
-| `npm:@narumitw/pi-plan-mode` | Plan/Agent mode, `/plan`, interactive question cards |
-| `npm:pi-mcp-adapter` | MCP servers from `mcp.json` |
-
-Install via the first-launch prompt, **vs-pi-agent: Install Recommended Packages**, or the package catalog in settings.
-
-Settings: `pi-agent.promptRecommendedPackages`, `pi-agent.autoInstallRecommendedPackages`.
 
 ## Commands
 
@@ -84,7 +67,6 @@ Settings: `pi-agent.promptRecommendedPackages`, `pi-agent.autoInstallRecommended
 | **vs-pi-agent: Logout (/logout)** | Remove stored credentials |
 | **vs-pi-agent: Open Settings** | Full Pi agent configuration |
 | **vs-pi-agent: Select Model** | Model picker |
-| **vs-pi-agent: Install Recommended Packages** | Plan mode + MCP adapter |
 | **vs-pi-agent: Reload Session** | Reload packages, skills, extensions |
 
 ## Install from source
@@ -96,7 +78,7 @@ npm install
 npm run compile
 ```
 
-**VSIX:** `npm run package` → *Extensions: Install from VSIX…*
+**VSIX:** `npm run package` → *Extensions → Install from VSIX…*
 
 ## Development
 
@@ -107,15 +89,6 @@ npm run test:unit
 ```
 
 Press **F5** for Extension Development Host.
-```bash
-```
-
-## Publish VSIX
-
-```bash
-npm run package
-# vs-pi-agent-<version>.vsix → Open VSX / Marketplace / GitHub Releases
-```
 
 ## License
 
