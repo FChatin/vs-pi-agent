@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ImageContent } from '@earendil-works/pi-ai';
+import type { ImageContent } from '../shared/piTypes';
 import type { ProcessedFileAttachment } from './fileAttachments';
 
 export interface PendingAttachment {

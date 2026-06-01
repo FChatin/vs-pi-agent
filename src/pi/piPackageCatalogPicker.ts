@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { PiSessionManager } from './session';
+import type { PiChatSession } from './slashCommands';
 import {
     formatCatalogDetail,
     formatCatalogOwnerLine,
@@ -8,8 +8,7 @@ import {
 } from './piPackageCatalog';
 import { installPiPackage } from './piPackageInstall';
 import { packageSourceToString } from './piAgentConfig';
-import { loadPiCodingAgent } from './piSdk';
-import { getPiAgentDir } from './piCliSync';
+import { getPiPackagesFromSettings } from './piSettingsJson';
 
 interface CatalogQuickPickItem extends vscode.QuickPickItem {
     entry: PiCatalogEntry;
@@ -17,11 +16,7 @@ interface CatalogQuickPickItem extends vscode.QuickPickItem {
 }
 
 async function getInstalledPackageSources(): Promise<Set<string>> {
-    const { SettingsManager } = await loadPiCodingAgent();
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-    const agentDir = await getPiAgentDir();
-    const sm = SettingsManager.create(cwd, agentDir);
-    return new Set(sm.getPackages().map(packageSourceToString));
+    return new Set(getPiPackagesFromSettings());
 }
 
 function entryToQuickPickItem(entry: PiCatalogEntry, installed: boolean): CatalogQuickPickItem {
@@ -38,7 +33,7 @@ function entryToQuickPickItem(entry: PiCatalogEntry, installed: boolean): Catalo
 }
 
 export async function showPiPackageCatalogPicker(
-    piSession: PiSessionManager | undefined,
+    piSession: PiChatSession | undefined,
     outputChannel?: vscode.OutputChannel,
 ): Promise<void> {
     const quickPick = vscode.window.createQuickPick<CatalogQuickPickItem>();

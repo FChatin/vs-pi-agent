@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import type { SettingsClientMessage, SettingsServerMessage, SettingsData, SkillInfo } from '../shared/protocol';
-import type { PiSessionManager } from '../pi/session';
+import type { PiChatSession } from '../pi/slashCommands';
 import {
     addPiExtensionPath,
     addPiPackage,
@@ -22,9 +22,9 @@ import {
     readPiCliSettingsSummary,
 } from '../pi/piCliSync';
 import { showPiPackageCatalogPicker } from '../pi/piPackageCatalogPicker';
-import { loadPiCodingAgent } from '../pi/piSdk';
 import { loadMcpSettingsSnapshot, probeMcpServer, setMcpServerEnabled } from '../pi/mcpConfig';
 import { getMissingRecommendedPackages } from '../pi/recommendedPackages';
+import { rebuildAgentNativeModules } from '../pi/piExtensionCompat';
 import { runPiLoginFlow, runPiLogoutFlow } from '../pi/slashCommands';
 
 const API_KEY_PREFIX = 'pi-agent.apiKey.';
@@ -34,7 +34,7 @@ export class SettingsPanel {
     private _panel: vscode.WebviewPanel;
     private _extensionUri: vscode.Uri;
     private _secrets: vscode.SecretStorage;
-    private _piSession: PiSessionManager | undefined;
+    private _piSession: PiChatSession | undefined;
     private _extensionVersion: string;
     private _outputChannel: vscode.OutputChannel | undefined;
     private _disposables: vscode.Disposable[] = [];
@@ -45,7 +45,7 @@ export class SettingsPanel {
         extensionUri: vscode.Uri,
         secrets: vscode.SecretStorage,
         extensionVersion: string,
-        piSession?: PiSessionManager,
+        piSession?: PiChatSession,
         outputChannel?: vscode.OutputChannel,
     ) {
         this._panel = panel;
@@ -79,7 +79,34 @@ export class SettingsPanel {
     static show(
         extensionUri: vscode.Uri,
         secrets: vscode.SecretStorage,
-        piSession?: PiSessionManager,
+        piSession?: PiChatSession,
+        extensionVersion?: string,
+        outputChannel?: vscode.OutputChannel,
+    ): void {
+        SettingsPanel._open(extensionUri, secrets, piSession, extensionVersion, outputChannel);
+    }
+
+    /** Open settings and scroll to a section (e.g. from /mcp in chat). */
+    static showWithSection(section: string): void {
+        const inst = SettingsPanel._instance;
+        if (inst) {
+            inst._panel.reveal(vscode.ViewColumn.One);
+            void inst._sendSettings();
+            inst._post({ type: 'scrollToSection', section });
+            return;
+        }
+        vscode.commands.executeCommand('pi-agent.openSettings').then(() => {
+            const opened = SettingsPanel._instance;
+            if (opened) {
+                opened._post({ type: 'scrollToSection', section });
+            }
+        });
+    }
+
+    private static _open(
+        extensionUri: vscode.Uri,
+        secrets: vscode.SecretStorage,
+        piSession?: PiChatSession,
         extensionVersion?: string,
         outputChannel?: vscode.OutputChannel,
     ): void {
@@ -246,6 +273,13 @@ export class SettingsPanel {
                 case 'runPiLogout':
                     await this._runPiLogout();
                     break;
+                case 'rebuildNativeModules':
+                    await rebuildAgentNativeModules(this._outputChannel ?? vscode.window.createOutputChannel('vs-pi-agent'));
+                    if (this._piSession) {
+                        await this._piSession.reloadPiAgentResources();
+                    }
+                    await this._sendSettings();
+                    break;
             }
         } catch (err: any) {
             this._post({ type: 'error', message: err.message ?? String(err) });
@@ -261,22 +295,20 @@ export class SettingsPanel {
     }
 
     private async _runPiLogin(): Promise<void> {
-        const session = this._piSession?.session;
-        if (!session) {
+        if (!this._piSession) {
             this._post({ type: 'error', message: 'No active Pi session. Open the chat sidebar and try again.' });
             return;
         }
-        await runPiLoginFlow(session);
+        await runPiLoginFlow(this._piSession);
         await this._sendSettings();
     }
 
     private async _runPiLogout(): Promise<void> {
-        const session = this._piSession?.session;
-        if (!session) {
+        if (!this._piSession) {
             this._post({ type: 'error', message: 'No active Pi session. Open the chat sidebar and try again.' });
             return;
         }
-        await runPiLogoutFlow(session);
+        await runPiLogoutFlow(this._piSession);
         await this._sendSettings();
     }
 
@@ -344,8 +376,8 @@ export class SettingsPanel {
         const config = vscode.workspace.getConfiguration('pi-agent');
         const sync = isSyncWithPiCli();
         const provider = config.get<string>('apiProvider', '');
-        const agentDir = await getPiAgentDir();
-        const piSummary = sync ? await readPiCliSettingsSummary() : undefined;
+        const agentDir = getPiAgentDir();
+        const piSummary = sync ? readPiCliSettingsSummary() : undefined;
         let piConfig: SettingsData['piConfig'];
         let piConfigLoadError: string | undefined;
         if (sync) {
@@ -387,12 +419,17 @@ export class SettingsPanel {
             contextUsageWarningThreshold: config.get<number>('contextUsageWarningThreshold', 80),
         };
 
+        if (this._piSession) {
+            data.extensionLoadIssues = this._piSession.getExtensionLoadIssues();
+            data.loadedExtensionCount = this._piSession.getLoadedExtensionCount();
+        }
+
         if (sync && piConfig) {
             data.mcpSnapshot = await loadMcpSettingsSnapshot(piConfig.packages, this._mcpProbeResults);
-            const missing = getMissingRecommendedPackages(
-                piConfig.packages,
-                this._piSession?.session,
-            );
+            const slash = this._piSession
+                ? (await this._piSession.listSlashCommands()).map((c) => c.name.replace(/^skill:/, ''))
+                : [];
+            const missing = getMissingRecommendedPackages(piConfig.packages, slash);
             if (missing.length > 0) {
                 data.recommendedPackagesMissing = missing.map((p) => p.source);
             }
@@ -402,35 +439,12 @@ export class SettingsPanel {
     }
 
     private async _sendSkills(): Promise<void> {
-        if (this._piSession?.session) {
-            const skills = this._piSession.getSkills();
+        if (this._piSession) {
+            const skills = await this._piSession.getSkillsAsync();
             this._post({ type: 'skills', skills });
             return;
         }
-
-        try {
-            const { loadSkills, SettingsManager } = await loadPiCodingAgent();
-            const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-            const agentDir = await getPiAgentDir();
-            const settingsManager = SettingsManager.create(cwd, agentDir);
-            const skillPaths = settingsManager.getSkillPaths();
-            const { skills: rawSkills } = loadSkills({
-                cwd,
-                agentDir,
-                skillPaths,
-                includeDefaults: true,
-            });
-            const skills: SkillInfo[] = rawSkills.map((s: any) => ({
-                name: s.name,
-                description: s.description ?? '',
-                filePath: s.filePath ?? '',
-                source: s.sourceInfo?.source ?? '',
-                disableModelInvocation: s.disableModelInvocation ?? false,
-            }));
-            this._post({ type: 'skills', skills });
-        } catch {
-            this._post({ type: 'skills', skills: [] });
-        }
+        this._post({ type: 'skills', skills: [] });
     }
 
     private _detectAuthMethod(

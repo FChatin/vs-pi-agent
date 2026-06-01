@@ -17,11 +17,7 @@ describe('recommendedPackages', () => {
     });
 
     it('treats /plan command as plan package present', () => {
-        const missing = getMissingRecommendedPackages([], {
-            extensionRunner: {
-                getRegisteredCommands: () => [{ invocationName: 'plan', name: 'plan' }],
-            },
-        } as any);
+        const missing = getMissingRecommendedPackages([], ['plan']);
         expect(missing.some((p) => p.id === 'pi-plan-mode')).toBe(false);
         expect(missing.some((p) => p.id === 'pi-mcp-adapter')).toBe(true);
     });

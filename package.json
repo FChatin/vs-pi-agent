@@ -1,8 +1,8 @@
 {
   "name": "vscode-pi-agent",
 	"displayName": "vscode-pi-agent",
-  "description": "Pi coding agent in VS Code — sidebar chat, tools, sessions, and sync with ~/.pi/agent.",
-	"version": "0.2.39",
+  "description": "Pi coding agent in VS Code — sidebar GUI for `pi --mode rpc` (full CLI parity, no bundled SDK).",
+	"version": "0.2.56",
 	"publisher": "fchatin",
   "license": "MIT",
   "repository": {
@@ -100,6 +100,10 @@
         "title": "vs-pi-agent: Open Settings"
       },
       {
+        "command": "pi-agent.openMcpSettings",
+        "title": "vs-pi-agent: MCP Settings (/mcp)"
+      },
+      {
         "command": "pi-agent.login",
         "title": "vs-pi-agent: Login (/login)"
       },
@@ -118,6 +122,10 @@
       {
         "command": "pi-agent.browsePackages",
         "title": "vs-pi-agent: Browse Package Catalog"
+      },
+      {
+        "command": "pi-agent.rebuildNativeModules",
+        "title": "vs-pi-agent: Rebuild Pi Native Modules"
       }
     ],
     "keybindings": [
@@ -140,25 +148,15 @@
     "configuration": {
       "title": "vs-pi-agent",
       "properties": {
-        "pi-agent.syncWithPiCli": {
-          "type": "boolean",
-          "default": true,
-          "description": "Use Pi CLI config (~/.pi/agent): auth, settings.json, packages, skills, and sessions. Recommended."
-        },
-        "pi-agent.apiProvider": {
+        "pi-agent.cliPath": {
           "type": "string",
           "default": "",
-          "description": "Preferred AI provider (only when syncWithPiCli is false). Leave empty for automatic detection."
+          "description": "Path to pi CLI executable (default: auto-detect from PATH). Required: pi must be installed globally."
         },
-        "pi-agent.apiBaseUrl": {
+        "pi-agent.nodePath": {
           "type": "string",
           "default": "",
-          "description": "Custom API base URL for self-hosted or proxy endpoints. Leave empty to use the provider default."
-        },
-        "pi-agent.defaultModel": {
-          "type": "string",
-          "default": "",
-          "description": "Default model ID to use when starting new sessions (e.g. claude-sonnet-4-20250514). Leave empty for automatic selection."
+          "description": "Path to Node.js binary used to run pi (default: node next to pi on PATH). Set this if native tools (memory_search) fail with NODE_MODULE_VERSION errors."
         },
         "pi-agent.thinkingLevel": {
           "type": "string",
@@ -176,22 +174,6 @@
           "type": "boolean",
           "default": false,
           "description": "Automatically approve tool executions without confirmation"
-        },
-        "pi-agent.allowedTools": {
-          "type": "array",
-          "items": { "type": "string" },
-          "default": [],
-          "description": "Restrict which tools the agent can use. Leave empty to allow all tools."
-        },
-        "pi-agent.autoSaveSessions": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically persist sessions"
-        },
-        "pi-agent.sessionStoragePath": {
-          "type": "string",
-          "default": "",
-          "description": "Custom session directory (only when syncWithPiCli is false). When sync is on, uses ~/.pi/agent/sessions/ like Pi CLI."
         },
         "pi-agent.contextUsageWarningThreshold": {
           "type": "number",
@@ -225,8 +207,6 @@
     "test:all": "npm run test:unit && npm run test:integration"
   },
 	"dependencies": {
-		"@earendil-works/pi-agent-core": "^0.78.0",
-		"@earendil-works/pi-coding-agent": "^0.78.0",
 		"marked": "^18.0.2",
 		"proper-lockfile": "^4.1.2"
 	},

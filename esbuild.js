@@ -4,53 +4,16 @@ const fs = require('fs');
 
 const isWatch = process.argv.includes('--watch');
 
-const importMetaPlugin = {
-    name: 'import-meta-shim',
-    setup(build) {
-        build.onLoad({ filter: /node_modules[\\/]@(?:mariozechner|earendil-works)[\\/].*\.js$/ }, async (args) => {
-            let contents = await fs.promises.readFile(args.path, 'utf8');
-            if (!contents.includes('import.meta')) return;
-            contents = contents.replace(
-                /\bimport\.meta\.resolve\b/g,
-                '((_spec) => globalThis.__piBundle.pathToFileURL(require.resolve(_spec)).href)',
-            );
-            contents = contents.replace(
-                /\bimport\.meta\.url\b/g,
-                'globalThis.__piBundle.url',
-            );
-            return { contents, loader: 'js' };
-        });
-    },
-};
-
-/** Must match runtime node_modules so ~/.pi/agent npm packages share one SDK. */
-const PI_SDK_EXTERNALS = [
-    '@earendil-works/pi-coding-agent',
-    '@earendil-works/pi-agent-core',
-    '@earendil-works/pi-ai',
-    '@earendil-works/pi-tui',
-];
-
 const extensionConfig = {
     entryPoints: ['src/extension.ts'],
     bundle: true,
     outfile: 'out/extension.js',
-    external: ['vscode', ...PI_SDK_EXTERNALS],
+    external: ['vscode'],
     format: 'cjs',
     platform: 'node',
     target: 'node22',
     sourcemap: true,
     minify: false,
-    plugins: [importMetaPlugin],
-    banner: {
-        js: [
-            'globalThis.__piBundle = (function() {',
-            '  var u = require("url");',
-            '  var meta = u.pathToFileURL(__filename).href;',
-            '  return { url: meta, pathToFileURL: u.pathToFileURL };',
-            '})();',
-        ].join('\n'),
-    },
 };
 
 const webviewConfig = {

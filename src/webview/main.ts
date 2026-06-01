@@ -9,9 +9,11 @@ import type {
     SkillInfo,
     SlashCommandListItem,
     PlanModeInfo,
+    PiExtensionChromeSnapshot,
     ContextUsageInfo,
     SessionTokenStats,
     PendingAttachmentPreview,
+    ConnectionStatus,
 } from '../shared/protocol';
 import { dismissExtensionUi, initExtensionUiHost, showExtensionUiRequest } from './extensionUi';
 import { isImageFilePath, parseUserMessageForDisplay } from '../shared/attachmentMessageDisplay';
@@ -57,8 +59,12 @@ const state: {
     skills: SkillInfo[];
     slashCommands: SlashCommandListItem[];
     queuedMessages: string[];
+    steeringMessages: string[];
+    followUpMessages: string[];
     pendingAttachments: PendingAttachmentPreview[];
     planMode: PlanModeInfo;
+    piExtensionChrome?: PiExtensionChromeSnapshot;
+    connectionStatus: ConnectionStatus;
 } = {
     messages: [],
     isStreaming: false,
@@ -77,8 +83,11 @@ const state: {
     skills: [],
     slashCommands: [],
     queuedMessages: [],
+    steeringMessages: [],
+    followUpMessages: [],
     pendingAttachments: [],
     planMode: emptyPlanMode(),
+    connectionStatus: { phase: 'idle' },
 };
 
 function emptyPlanMode(): PlanModeInfo {
@@ -90,6 +99,29 @@ function emptyPlanMode(): PlanModeInfo {
         planMarkdown: '',
         todos: [],
     };
+}
+
+function lastAssistantMessage(messages: any[] | undefined): any | undefined {
+    if (!messages?.length) {
+        return undefined;
+    }
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i]?.role === 'assistant') {
+            return messages[i];
+        }
+    }
+    return undefined;
+}
+
+function failedConnectionFromAssistant(msg: any | undefined): ConnectionStatus | undefined {
+    if (!msg || msg.stopReason !== 'error') {
+        return undefined;
+    }
+    const message =
+        typeof msg.errorMessage === 'string' && msg.errorMessage.trim()
+            ? msg.errorMessage.trim()
+            : 'Request failed';
+    return { phase: 'failed', message };
 }
 
 // ── Marked config ──
@@ -120,6 +152,8 @@ function renderMarkdown(text: string): string {
     if (!text) return '';
     return marked.parse(text) as string;
 }
+
+import { applySessionList, onAppShellRebuilt, requestSessionPanelToggle, setSessionPanelOpen } from './sessionPanel';
 
 // ── Message handling ──
 
@@ -154,9 +188,6 @@ function handleMessage(msg: ServerMessage): void {
                 showModelPicker();
             }
             break;
-        case 'sessions':
-            renderSessionList(msg.sessions, msg.currentSessionId);
-            break;
         case 'fileChange':
             state.fileChanges.push(msg.change);
             renderChangedFilesBar();
@@ -186,6 +217,29 @@ function handleMessage(msg: ServerMessage): void {
         case 'extensionUiDismiss':
             dismissExtensionUi(msg.id);
             break;
+        case 'piExtensionChrome':
+            state.piExtensionChrome = msg.chrome;
+            updatePlanPanel();
+            updateExtensionChromeStrip();
+            break;
+        case 'setComposerText': {
+            const input = document.getElementById('input') as HTMLTextAreaElement | null;
+            if (input && msg.text) {
+                input.value = msg.text;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.focus();
+            }
+            break;
+        }
+        case 'toast':
+            showToast(msg.message, msg.variant === 'error' ? 'error' : 'info');
+            break;
+        case 'sessionPanel':
+            setSessionPanelOpen(msg.open);
+            break;
+        case 'sessionList':
+            applySessionList(msg.data);
+            break;
     }
 }
 
@@ -205,6 +259,9 @@ function handleConfirmResult(action: string, confirmed: boolean, payload?: any):
 
 function applyStateSync(s: SerializedAgentState): void {
     const prevTab = state.activeTabId;
+    const prevStreamingText = state.streamingText;
+    const prevStreamingThinking = state.streamingThinking;
+    const prevIsThinking = state.isThinking;
     state.messages = s.messages ?? [];
     state.isStreaming = s.isStreaming;
     state.model = s.model;
@@ -223,9 +280,29 @@ function applyStateSync(s: SerializedAgentState): void {
     state.isThinking = s.isThinking ?? false;
     state.thinkingStartTime = s.thinkingStartTime ?? 0;
     state.streamingThinkingDuration = s.streamingThinkingDuration ?? 0;
+    // During live streaming the webview often has fresher partial text than RPC stateSync.
+    if (s.isStreaming) {
+        if (prevStreamingText.length > state.streamingText.length) {
+            state.streamingText = prevStreamingText;
+        }
+        if (prevStreamingThinking.length > state.streamingThinking.length) {
+            state.streamingThinking = prevStreamingThinking;
+        }
+        if (prevIsThinking && !state.isThinking) {
+            state.isThinking = prevIsThinking;
+        }
+    }
     state.queuedMessages = s.queuedMessages ?? [];
+    state.steeringMessages = s.steeringMessages ?? [];
+    state.followUpMessages = s.followUpMessages ?? [];
     state.pendingAttachments = s.pendingAttachments ?? [];
     state.planMode = s.planMode ?? state.planMode;
+    state.piExtensionChrome = s.piExtensionChrome ?? state.piExtensionChrome;
+    document.getElementById('mode-switch')?.classList.remove('mode-switch--pending');
+    document.querySelectorAll('#mode-switch [data-mode]').forEach((b) => {
+        (b as HTMLButtonElement).disabled = false;
+    });
+    state.connectionStatus = s.connectionStatus ?? { phase: 'idle' };
     const tabSwitched = prevTab !== state.activeTabId;
 
     if (tabSwitched || !skeletonBuilt) {
@@ -241,13 +318,22 @@ function applyStateSync(s: SerializedAgentState): void {
         updateModeSwitch();
         updateChangedFiles();
         updateQueuedMessageBanner();
+        updatePendingMessagesInChat();
         updateAttachmentsStrip();
+        updateConnectionBanner();
         updatePlanPanel();
         refreshFooterTokenStats();
+        updateFooterModel();
         if (state.isStreaming) {
-            ensurePreparingPlaceholder();
+            if (state.isThinking) {
+                setStreamPhase('thinking');
+            } else if (state.streamingText) {
+                setStreamPhase('writing');
+            } else {
+                setStreamPhase('waiting');
+            }
         } else {
-            removePreparingPlaceholder();
+            setStreamPhase('idle');
         }
         updateScrollButton();
     }
@@ -255,35 +341,141 @@ function applyStateSync(s: SerializedAgentState): void {
 
 function handleAgentEvent(event: any): void {
     switch (event.type) {
+        case 'message_start': {
+            const msg = event.message;
+            if (msg?.role === 'user') {
+                appendUserMessageImmediate(msg);
+            }
+            break;
+        }
+        case 'queue_update':
+            state.steeringMessages = Array.isArray(event.steering)
+                ? event.steering.map(String)
+                : [];
+            state.followUpMessages = Array.isArray(event.followUp)
+                ? event.followUp.map(String)
+                : [];
+            updatePendingMessagesInChat();
+            break;
         case 'message_update':
-            if (event.assistantMessageEvent) {
+            if (state.isStreaming && event.assistantMessageEvent) {
                 handleStreamingDelta(event.assistantMessageEvent);
+            }
+            if (event.message?.role === 'assistant') {
+                syncThinkingFromAssistantMessage(event.message);
+                scheduleStreamingRender();
+            }
+            break;
+        case 'message_end':
+            if (event.message?.role === 'assistant') {
+                syncThinkingFromAssistantMessage(event.message);
+                if (event.message.stopReason === 'toolUse') {
+                    state.streamingThinking = '';
+                    state.isThinking = false;
+                }
+                scheduleStreamingRender();
+            }
+            break;
+        case 'context_usage':
+            if (event.usage) {
+                state.contextUsage = {
+                    tokens: event.usage.tokens ?? null,
+                    contextWindow: event.usage.contextWindow ?? 0,
+                    percent: event.usage.percent ?? null,
+                };
+                refreshFooterTokenStats();
             }
             break;
         case 'agent_start':
+            state.connectionStatus = { phase: 'idle' };
             state.isStreaming = true;
             state.streamingText = '';
             state.streamingThinking = '';
             state.isThinking = false;
+            streamingThinkingUserOpen = false;
+            clearStreamingToolArtifacts();
+            setStreamPhase('waiting');
             userHasScrolled = false;
             updateInputArea();
+            updateConnectionBanner();
             updateStreamingUI();
-            showPreparingPlaceholder();
             break;
-        case 'agent_end':
-            state.isStreaming = false;
-            state.streamingText = '';
-            state.streamingThinking = '';
-            state.isThinking = false;
-            dismissSteerToast();
+        case 'agent_end': {
+            const willRetry = event.willRetry === true;
+            if (willRetry) {
+                const lastAssistant = lastAssistantMessage(event.messages);
+                state.connectionStatus = {
+                    phase: 'retrying',
+                    message:
+                        (typeof lastAssistant?.errorMessage === 'string'
+                            ? lastAssistant.errorMessage
+                            : undefined) ?? 'Connection lost — retrying…',
+                };
+                state.isStreaming = true;
+            } else {
+                const failed = failedConnectionFromAssistant(
+                    lastAssistantMessage(event.messages),
+                );
+                state.connectionStatus = failed ?? { phase: 'idle' };
+                state.isStreaming = false;
+                state.streamingText = '';
+                state.streamingThinking = '';
+                state.isThinking = false;
+                setStreamPhase('idle');
+                if (failed?.message) {
+                    showError(failed.message);
+                }
+            }
             updateStreamingUI();
             updateInputArea();
+            updateConnectionBanner();
             updateModeSwitch();
             updatePlanPanel();
             refreshFooterTokenStats();
             break;
+        }
+        case 'auto_retry_start':
+            state.connectionStatus = {
+                phase: 'retrying',
+                message: event.errorMessage ?? 'Connection error',
+                attempt: event.attempt,
+                maxAttempts: event.maxAttempts,
+            };
+            state.isStreaming = true;
+            updateInputArea();
+            updateConnectionBanner();
+            break;
+        case 'auto_retry_end':
+            if (event.success) {
+                state.connectionStatus = { phase: 'idle' };
+            } else {
+                state.connectionStatus = {
+                    phase: 'failed',
+                    message:
+                        event.finalError ??
+                        'Could not reach the model after multiple attempts.',
+                    attempt: event.attempt,
+                };
+                state.isStreaming = false;
+                if (state.connectionStatus.message) {
+                    showError(state.connectionStatus.message);
+                }
+            }
+            updateInputArea();
+            updateConnectionBanner();
+            break;
+        case 'compaction_end':
+            if (event.errorMessage && !event.willRetry) {
+                state.connectionStatus = {
+                    phase: 'failed',
+                    message: event.errorMessage,
+                };
+                showError(event.errorMessage);
+                updateConnectionBanner();
+            }
+            break;
         case 'tool_execution_start':
-            removePreparingPlaceholder();
+            setStreamPhase('tool', event.toolName ?? 'tool');
             renderToolStart(event);
             break;
         case 'tool_execution_update':
@@ -291,7 +483,13 @@ function handleAgentEvent(event: any): void {
             break;
         case 'tool_execution_end':
             renderToolEnd(event);
-            showPreparingPlaceholder();
+            if (state.isThinking) {
+                setStreamPhase('thinking');
+            } else if (state.streamingText) {
+                setStreamPhase('writing');
+            } else {
+                setStreamPhase('waiting');
+            }
             break;
     }
 }
@@ -300,30 +498,209 @@ function handleStreamingDelta(ae: any): void {
     switch (ae.type) {
         case 'thinking_start':
             state.isThinking = true;
-            state.streamingThinking = '';
+            if (state.streamingThinking.trim().length > 0) {
+                state.streamingThinking += '\n\n';
+            }
             state.thinkingStartTime = Date.now();
             state.streamingThinkingDuration = 0;
+            setStreamPhase('thinking');
             break;
         case 'thinking_delta':
             state.streamingThinking += ae.delta ?? '';
-            dismissSteerToast();
+            setStreamPhase('thinking');
             break;
         case 'thinking_end':
             state.isThinking = false;
             if (state.thinkingStartTime > 0) {
                 state.streamingThinkingDuration = Math.round((Date.now() - state.thinkingStartTime) / 1000);
             }
+            setStreamPhase(state.streamingText ? 'writing' : 'waiting');
             break;
         case 'text_start':
+            setStreamPhase('writing');
             break;
         case 'text_delta':
             state.streamingText += ae.delta ?? '';
-            dismissSteerToast();
+            setStreamPhase('writing');
             break;
         case 'text_end':
             break;
     }
-    renderStreamingContent();
+    scheduleStreamingRender();
+}
+
+let streamRenderPending = false;
+/** User expanded streaming thinking — preserve across delta re-renders. */
+let streamingThinkingUserOpen = false;
+
+type StreamPhase = 'idle' | 'thinking' | 'tool' | 'writing' | 'waiting';
+let streamPhase: StreamPhase = 'idle';
+let streamPhaseDetail = '';
+
+function setStreamPhase(phase: StreamPhase, detail = ''): void {
+    streamPhase = phase;
+    streamPhaseDetail = detail;
+    updateStreamActivityBar();
+}
+
+function streamActivityLabel(): string {
+    switch (streamPhase) {
+        case 'thinking':
+            return 'Thinking…';
+        case 'tool':
+            return streamPhaseDetail ? `Running ${streamPhaseDetail}…` : 'Running tool…';
+        case 'writing':
+            return 'Writing response…';
+        case 'waiting':
+            return streamPhaseDetail || 'Working…';
+        default:
+            return state.isStreaming ? 'Pi is working…' : '';
+    }
+}
+
+function streamingThinkingBlockVisible(): boolean {
+    const streamingThinkingText = state.streamingThinking.trim();
+    return (
+        state.isStreaming &&
+        (state.isThinking || Boolean(streamingThinkingText)) &&
+        !assistantMessageAlreadyShowsThinking(streamingThinkingText)
+    );
+}
+
+function updateStreamActivityBar(): void {
+    const bar = document.getElementById('stream-activity');
+    const container = document.getElementById('streaming-message');
+    if (!bar || !container) {
+        return;
+    }
+    const label = streamActivityLabel();
+    const active = state.isStreaming;
+    // Live reasoning uses the expandable thinking block; hide the duplicate status pill.
+    const hideForThinkingBlock =
+        streamingThinkingBlockVisible() && streamPhase === 'thinking';
+    container.classList.toggle('streaming-active', active);
+    bar.classList.toggle('stream-activity--idle', !active || hideForThinkingBlock);
+    bar.classList.toggle('stream-activity--thinking', streamPhase === 'thinking');
+    bar.classList.toggle('stream-activity--tool', streamPhase === 'tool');
+    bar.classList.toggle('stream-activity--writing', streamPhase === 'writing');
+    if (!active) {
+        return;
+    }
+    const labelEl = bar.querySelector('.stream-activity-label');
+    if (labelEl && labelEl.textContent !== label) {
+        labelEl.textContent = label;
+    }
+}
+
+let scrollFollowPending = false;
+
+/** Scroll only when the user is already following the stream (avoids layout jump spam). */
+function scrollIfFollowing(): void {
+    if (userHasScrolled) {
+        return;
+    }
+    if (scrollFollowPending) {
+        return;
+    }
+    scrollFollowPending = true;
+    requestAnimationFrame(() => {
+        scrollFollowPending = false;
+        if (userHasScrolled) {
+            return;
+        }
+        if (isNearBottom()) {
+            scrollToBottom();
+        }
+    });
+}
+
+function scheduleStreamingRender(): void {
+    if (streamRenderPending) {
+        return;
+    }
+    streamRenderPending = true;
+    requestAnimationFrame(() => {
+        streamRenderPending = false;
+        renderStreamingContent();
+        updateStreamActivityBar();
+    });
+}
+
+function messageFingerprint(msg: any): string {
+    const role = msg?.role ?? '';
+    const text = extractText(msg);
+    const ts = msg?.timestamp ?? '';
+    return `${role}:${text}:${ts}`;
+}
+
+function appendUserMessageImmediate(msg: any): void {
+    const fp = messageFingerprint(msg);
+    const last = state.messages[state.messages.length - 1];
+    if (last && messageFingerprint(last) === fp) {
+        return;
+    }
+    if (last?._optimistic && last.role === 'user' && extractText(last) === extractText(msg)) {
+        state.messages[state.messages.length - 1] = msg;
+        updateMessages();
+        return;
+    }
+    state.messages.push(msg);
+    appendChatMessageDom(msg, state.messages.length - 1);
+    scrollToBottom();
+}
+
+function appendOptimisticUserMessage(text: string, attachmentCount: number): void {
+    const suffix =
+        attachmentCount > 0 ? `\n\n[+${attachmentCount} attachment(s)]` : '';
+    const content = text + suffix;
+    const msg = { role: 'user', content, _optimistic: true };
+    state.messages.push(msg);
+    appendChatMessageDom(msg, state.messages.length - 1);
+    scrollToBottom();
+}
+
+function appendChatMessageDom(msg: any, index: number): void {
+    const container = document.getElementById('messages');
+    const streamingEl = document.getElementById('streaming-message');
+    if (!container || !streamingEl || shouldHideMessageInChat(msg)) {
+        return;
+    }
+    const welcome = container.querySelector('.welcome');
+    welcome?.remove();
+    let userMsgCount = 0;
+    for (let i = 0; i <= index && i < state.messages.length; i++) {
+        if (state.messages[i]?.role === 'user') {
+            userMsgCount++;
+        }
+    }
+    const turnNumber = msg.role === 'user' ? userMsgCount : undefined;
+    const msgEl = renderMessage(msg, index, turnNumber);
+
+    if (msg.role === 'user') {
+        const turn = el('div', 'chat-turn');
+        const turnBody = el('div', 'chat-turn-body');
+        turn.appendChild(msgEl);
+        turn.appendChild(turnBody);
+        container.insertBefore(turn, streamingEl);
+    } else {
+        const turns = container.querySelectorAll('.chat-turn');
+        const lastTurn = turns[turns.length - 1] as HTMLElement | undefined;
+        const turnBody = lastTurn?.querySelector('.chat-turn-body');
+        if (turnBody) {
+            turnBody.appendChild(msgEl);
+        } else {
+            container.insertBefore(msgEl, streamingEl);
+        }
+    }
+
+    markLatestUserMessageGroup();
+    bindCopyButtons();
+    bindCheckpointButtons();
+    bindRedoButtons();
+    bindDiffButtons();
+    bindToolClickable();
+    bindAttachmentOpenClicks();
+    bindMessageActionButtons();
 }
 
 // ── Rendering ──
@@ -346,7 +723,7 @@ function render(): void {
     const headerActions = el('div', 'header-right');
     headerActions.innerHTML = `
         <button class="icon-btn" id="btn-new-tab" title="New Agent"><img class="header-icon-img" src="${iconsBaseUri}/new.svg" alt="new"></button>
-        <button class="icon-btn" id="btn-sessions" title="Sessions"><img class="header-icon-img" src="${iconsBaseUri}/list.svg" alt="sessions"></button>
+        <button class="icon-btn" id="btn-sessions" title="Resume session"><img class="header-icon-img" src="${iconsBaseUri}/list.svg" alt="resume session"></button>
         <button class="icon-btn" id="btn-settings" title="Settings"><img class="header-icon-img" src="${iconsBaseUri}/settings.svg" alt="settings"></button>
     `;
     header.appendChild(headerActions);
@@ -355,8 +732,19 @@ function render(): void {
     // Messages container (persistent, children managed by updateMessages)
     const messagesContainer = el('div', 'messages');
     messagesContainer.id = 'messages';
+    const pendingMessages = el('div', 'pending-messages');
+    pendingMessages.id = 'pending-messages';
+    pendingMessages.style.display = 'none';
+    messagesContainer.appendChild(pendingMessages);
     const streamingContainer = el('div', 'streaming-message message-group-assistant');
     streamingContainer.id = 'streaming-message';
+    const streamActivity = el('div', 'stream-activity stream-activity--idle');
+    streamActivity.id = 'stream-activity';
+    streamActivity.setAttribute('aria-live', 'polite');
+    streamActivity.setAttribute('aria-atomic', 'true');
+    streamActivity.innerHTML =
+        '<span class="stream-activity-dot" aria-hidden="true"></span><span class="stream-activity-label"></span>';
+    streamingContainer.appendChild(streamActivity);
     messagesContainer.appendChild(streamingContainer);
     const spacer = el('div', 'messages-spacer');
     messagesContainer.appendChild(spacer);
@@ -376,6 +764,10 @@ function render(): void {
     const planPanel = el('div', 'plan-panel');
     planPanel.id = 'plan-panel';
     inputContainer.appendChild(planPanel);
+    const chromeStrip = el('div', 'extension-chrome-strip');
+    chromeStrip.id = 'extension-chrome-strip';
+    chromeStrip.style.display = 'none';
+    inputContainer.appendChild(chromeStrip);
     const extensionUiHost = el('div', 'extension-ui-host');
     extensionUiHost.id = 'extension-ui-host';
     extensionUiHost.style.display = 'none';
@@ -401,10 +793,32 @@ function render(): void {
     dropShiftHint.id = 'drop-shift-hint';
     dropShiftHint.hidden = true;
     inputContainer.appendChild(dropShiftHint);
+    const composerEditBanner = el('div', 'composer-edit-banner');
+    composerEditBanner.id = 'composer-edit-banner';
+    composerEditBanner.style.display = 'none';
+    inputContainer.appendChild(composerEditBanner);
     const area = el('div', 'input-area');
     area.innerHTML = `<textarea id="input" placeholder="Ask Pi anything..." rows="1"></textarea>`;
     inputContainer.appendChild(area);
     const footer = el('div', 'input-footer');
+    footer.innerHTML = `
+        <div class="composer-toolbar">
+            <div class="composer-toolbar-left">
+                <button id="btn-attach" class="composer-action-btn composer-action-btn--ghost" type="button" title="Attach files · @ paths · Shift+drop from Explorer">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13.5 8.5L7.2 14.8a3.5 3.5 0 01-5-5l6.8-6.8a2.5 2.5 0 013.5 3.5L5.7 12.3a1.5 1.5 0 01-2.1-2.1l6.1-6.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                </button>
+                <span class="footer-model" title="Change model">Model</span>
+            </div>
+            <div class="composer-toolbar-right">
+                <button id="btn-steer" class="composer-action-btn composer-action-btn--ghost" type="button" title="Steer (Ctrl+Enter)" hidden>
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 10l4-4 4 4" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+                <button id="btn-send" class="composer-action-btn composer-action-btn--primary" type="button" title="Send (Enter)" aria-label="Send message">
+                    <span class="composer-btn-icon composer-btn-icon--send" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 2.5v11M8 2.5L4 6.5M8 2.5l4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                    <span class="composer-btn-icon composer-btn-icon--stop" aria-hidden="true" hidden><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></svg></span>
+                </button>
+            </div>
+        </div>`;
     inputContainer.appendChild(footer);
     app.appendChild(inputContainer);
 
@@ -420,12 +834,15 @@ function render(): void {
 
     skeletonBuilt = true;
 
+    onAppShellRebuilt();
+
     // Populate all dynamic sections
     updateTabs();
     updateModeSwitch();
     updatePlanPanel();
     updateMessages();
     updateInputArea();
+        updateConnectionBanner();
         updateChangedFiles();
         scrollToBottom();
 }
@@ -436,22 +853,25 @@ function updateModeSwitch(): void {
 
     const pm = state.planMode ?? emptyPlanMode();
     const active = pm.enabled ? 'plan' : 'agent';
-    const badge =
-        pm.statusLabel === 'ready'
-            ? '<span class="mode-badge ready">ready</span>'
-            : '';
     const canImplement =
         pm.hasPlan && (pm.statusLabel === 'ready' || (!pm.enabled && pm.statusLabel === 'off'));
     const implementBtn =
         canImplement && !state.isStreaming
-            ? '<button type="button" class="mode-implement-btn" id="btn-implement-plan">Implement plan</button>'
+            ? '<button type="button" class="mode-action-btn" id="btn-implement-plan">Implement</button>'
+            : '';
+
+    const planReadyDot =
+        pm.statusLabel === 'ready'
+            ? '<span class="mode-ready-dot" title="Plan ready"></span>'
             : '';
 
     root.innerHTML = `
         <div class="mode-switch-row">
-            <div class="mode-switch-inner" role="tablist" aria-label="Agent mode">
-                <button type="button" class="mode-btn ${active === 'agent' ? 'active' : ''}" data-mode="agent">Agent</button>
-                <button type="button" class="mode-btn ${active === 'plan' ? 'active' : ''}" data-mode="plan">Plan ${badge}</button>
+            <div class="mode-segment" role="tablist" aria-label="Agent mode">
+                <button type="button" class="mode-segment-btn ${active === 'agent' ? 'active' : ''}" data-mode="agent">Agent</button>
+                <button type="button" class="mode-segment-btn ${active === 'plan' ? 'active' : ''}" data-mode="plan">
+                    <span class="mode-segment-label">Plan</span>${planReadyDot}
+                </button>
             </div>
             ${implementBtn}
         </div>
@@ -462,24 +882,10 @@ function updateModeSwitch(): void {
             const mode = (btn as HTMLButtonElement).dataset.mode as 'agent' | 'plan';
             const pm = state.planMode ?? emptyPlanMode();
             if ((mode === 'plan') === pm.enabled) return;
-            if (mode === 'agent') {
-                state.planMode = {
-                    ...pm,
-                    enabled: false,
-                    awaitingAction: false,
-                    statusLabel: 'off',
-                };
-            } else {
-                state.planMode = {
-                    ...pm,
-                    enabled: true,
-                    awaitingAction: false,
-                    statusLabel: pm.hasPlan ? 'ready' : 'planning',
-                };
-            }
-            updateModeSwitch();
-            updatePlanPanel();
-            updateInputArea();
+            root.classList.add('mode-switch--pending');
+            root.querySelectorAll('[data-mode]').forEach((b) => {
+                (b as HTMLButtonElement).disabled = true;
+            });
             vscode.postMessage({ type: 'setAgentMode', mode });
         });
     });
@@ -488,38 +894,105 @@ function updateModeSwitch(): void {
     });
 }
 
-/** Plan markdown/todos live in the editor only — no duplicate panel above input. */
+/** Plan markdown/todos live in the editor; composer shows live status from Pi extension chrome. */
 function updatePlanPanel(): void {
     const panel = document.getElementById('plan-panel');
     if (!panel) return;
 
     const pm = state.planMode;
+    const chrome = state.piExtensionChrome;
+    const planWidget = chrome?.widgets.find((w) => w.key === 'plan-mode-plan');
+    const widgetLines = planWidget?.lines?.filter((l) => l.trim()) ?? [];
+    const planStatus = chrome?.statuses.find((s) => s.key === 'plan-mode')?.text?.trim();
+
     const showHint = pm.enabled && !pm.hasPlan && !state.isStreaming;
-    if (!showHint) {
+    const showWidget = pm.enabled && widgetLines.length > 0;
+
+    if (!showHint && !showWidget) {
         panel.style.display = 'none';
         panel.innerHTML = '';
         return;
     }
 
     panel.style.display = '';
+    if (showWidget) {
+        const preview = widgetLines.slice(0, 6).map((l) => escHtml(l)).join('<br>');
+        const more = widgetLines.length > 6 ? `<div class="plan-panel-more">+${widgetLines.length - 6} more lines in editor</div>` : '';
+        panel.innerHTML = `
+            <div class="plan-panel-header">
+                <span class="plan-panel-title">Plan</span>
+                <span class="plan-panel-status">${escHtml(planStatus || (pm.statusLabel === 'ready' ? 'Ready to implement' : 'In progress'))}</span>
+            </div>
+            <div class="plan-panel-preview">${preview}${more}</div>
+            <button type="button" class="plan-panel-open" id="btn-open-plan-doc">Open plan in editor</button>
+        `;
+        document.getElementById('btn-open-plan-doc')?.addEventListener('click', () => {
+            vscode.postMessage({ type: 'openPlanDocument' });
+        });
+        return;
+    }
+
     panel.innerHTML = `
         <div class="plan-panel-header plan-panel-hint-only">
             <span class="plan-panel-title">Plan</span>
-            <span class="plan-panel-status">Exploring… When ready, the plan opens in the editor automatically.</span>
+            <span class="plan-panel-status">${escHtml(planStatus || 'Exploring… When ready, the plan opens in the editor automatically.')}</span>
         </div>
     `;
+}
+
+function updateExtensionChromeStrip(): void {
+    const host = document.getElementById('extension-chrome-strip');
+    if (!host) return;
+
+    const chrome = state.piExtensionChrome;
+    const belowWidgets =
+        chrome?.widgets.filter(
+            (w) => w.key !== 'plan-mode-plan' && w.placement === 'belowEditor' && w.lines?.length,
+        ) ?? [];
+
+    if (belowWidgets.length === 0) {
+        host.style.display = 'none';
+        host.innerHTML = '';
+        return;
+    }
+
+    host.style.display = '';
+    host.innerHTML = belowWidgets
+        .map(
+            (w) =>
+                `<div class="extension-chrome-widget"><div class="extension-chrome-widget-title">${escHtml(w.key)}</div>${w.lines!.map((l) => `<div class="extension-chrome-widget-line">${escHtml(l)}</div>`).join('')}</div>`,
+        )
+        .join('');
+}
+
+function markLatestUserMessageGroup(): void {
+    document.querySelectorAll('.message-group-user--latest').forEach((node) => {
+        node.classList.remove('message-group-user--latest');
+    });
+    const groups = document.querySelectorAll('.message-group-user');
+    const last = groups[groups.length - 1];
+    last?.classList.add('message-group-user--latest');
 }
 
 function updateMessages(): void {
     const container = document.getElementById('messages');
     if (!container) return;
 
+    captureThinkingOpenState();
+    captureToolsOpenState();
+
     const streamingEl = document.getElementById('streaming-message');
     const spacerEl = container.querySelector('.messages-spacer');
 
-    // Remove all children before #streaming-message (the message nodes)
-    while (container.firstChild && container.firstChild !== streamingEl) {
-        container.removeChild(container.firstChild);
+    // Remove message nodes only (keep pending steering/follow-up strip).
+    for (const child of [...container.childNodes]) {
+        if (child === streamingEl || child === spacerEl) {
+            break;
+        }
+        if ((child as HTMLElement).id === 'pending-messages') {
+            continue;
+        }
+        container.removeChild(child);
     }
 
     codeBlockId = 0;
@@ -531,6 +1004,50 @@ function updateMessages(): void {
         const rollbackUserIdx = state.rollbackPoint;
         let dimming = false;
         let redoPlaced = false;
+        let currentTurn: HTMLElement | null = null;
+        let turnBody: HTMLElement | null = null;
+        let turnThinkingParts: string[] = [];
+        let turnThinkingDurationSec = 0;
+        let turnUserMsgCount = 0;
+        let turnToolItems: Array<{ msg: any; index: number }> = [];
+
+        const flushTurnTools = (completedTurn = false): void => {
+            if (!turnBody || turnToolItems.length === 0) {
+                if (completedTurn) {
+                    turnToolItems = [];
+                }
+                return;
+            }
+            if (completedTurn || !state.isStreaming) {
+                turnBody
+                    .querySelector(`details.tools-block[data-tools-key="turn:${turnUserMsgCount}"]`)
+                    ?.remove();
+                turnBody.appendChild(
+                    buildMergedToolsBlock(turnToolItems, state.messages, turnUserMsgCount),
+                );
+                turnToolItems = [];
+            }
+        };
+
+        const flushTurnThinking = (completedTurn = false): void => {
+            if (!turnBody || turnThinkingParts.length === 0) {
+                if (completedTurn) {
+                    turnThinkingParts = [];
+                    turnThinkingDurationSec = 0;
+                }
+                return;
+            }
+            if (completedTurn || !state.isStreaming) {
+                prependMergedTurnThinking(
+                    turnBody,
+                    turnThinkingParts,
+                    turnThinkingDurationSec,
+                    `turn:${turnUserMsgCount}`,
+                );
+                turnThinkingParts = [];
+                turnThinkingDurationSec = 0;
+            }
+        };
 
         for (let i = 0; i < state.messages.length; i++) {
             const msg = state.messages[i];
@@ -540,30 +1057,95 @@ function updateMessages(): void {
             const role = msg.role ?? 'unknown';
 
             if (role === 'user') {
+                flushTurnTools(true);
+                flushTurnThinking(true);
                 userMsgCount++;
+                turnUserMsgCount = userMsgCount;
                 if (rollbackUserIdx !== null && userMsgCount > rollbackUserIdx) {
                     dimming = true;
                 }
+
+                currentTurn = el('div', 'chat-turn');
+                turnBody = el('div', 'chat-turn-body');
+
+                const msgEl = renderMessage(msg, i, userMsgCount);
+                if (dimming) {
+                    msgEl.classList.add('dimmed');
+                }
+                currentTurn.appendChild(msgEl);
+                currentTurn.appendChild(turnBody);
+                container.insertBefore(currentTurn, streamingEl);
+
+                if (dimming && !redoPlaced && rollbackUserIdx !== null) {
+                    const redoWrap = el('div', 'redo-anchor');
+                    const redoBtn = el('button', 'redo-btn');
+                    redoBtn.title = 'Redo changes';
+                    redoBtn.textContent = 'Redo';
+                    redoWrap.appendChild(redoBtn);
+                    turnBody.appendChild(redoWrap);
+                    redoPlaced = true;
+                }
+                continue;
             }
 
-            const msgEl = renderMessage(msg, i, role === 'user' ? userMsgCount : undefined);
+            if (role === 'toolResult' || role === 'tool') {
+                const toolName = msg.toolName ?? '';
+                if (toolName === 'edit' || toolName === 'write') {
+                    const matchingChange = findFileChangeForToolResult(msg);
+                    if (matchingChange) {
+                        if (!state.isStreaming) {
+                            const diffEl = buildDiffCard(matchingChange, msg);
+                            if (dimming) {
+                                diffEl.classList.add('dimmed');
+                            }
+                            if (turnBody) {
+                                turnBody.appendChild(diffEl);
+                            } else {
+                                container.insertBefore(diffEl, streamingEl);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                turnToolItems.push({ msg, index: i });
+                continue;
+            }
+
+            if (turnBody && role === 'assistant') {
+                const think = extractThinking(msg).trim();
+                if (think) {
+                    turnThinkingParts.push(think);
+                }
+                if (msg._thinkingDurationSec) {
+                    turnThinkingDurationSec += msg._thinkingDurationSec;
+                }
+            }
+
+            const msgEl = renderMessage(
+                msg,
+                i,
+                undefined,
+                turnBody ? { suppressThinking: true } : undefined,
+            );
             if (dimming) {
                 msgEl.classList.add('dimmed');
             }
 
-            container.insertBefore(msgEl, streamingEl);
-
-            if (role === 'user' && dimming && !redoPlaced && rollbackUserIdx !== null) {
-                const redoWrap = el('div', 'redo-anchor');
-                const redoBtn = el('button', 'redo-btn');
-                redoBtn.title = 'Redo changes';
-                redoBtn.textContent = 'Redo';
-                redoWrap.appendChild(redoBtn);
-                container.insertBefore(redoWrap, streamingEl);
-                redoPlaced = true;
+            if (turnBody) {
+                turnBody.appendChild(msgEl);
+            } else {
+                container.insertBefore(msgEl, streamingEl);
             }
         }
+        flushTurnTools(!state.isStreaming);
+        flushTurnThinking(!state.isStreaming);
     }
+
+    if (!state.isStreaming) {
+        clearStreamingToolArtifacts();
+    }
+
+    markLatestUserMessageGroup();
 
     bindCopyButtons();
     bindCheckpointButtons();
@@ -571,6 +1153,13 @@ function updateMessages(): void {
     bindDiffButtons();
     bindToolClickable();
     bindAttachmentOpenClicks();
+    bindMessageActionButtons();
+
+    const pendingEl = document.getElementById('pending-messages');
+    if (pendingEl && streamingEl && pendingEl.nextSibling !== streamingEl) {
+        container.insertBefore(pendingEl, streamingEl);
+    }
+    updatePendingMessagesInChat();
 }
 
 function updateTabs(): void {
@@ -672,79 +1261,181 @@ function updateAttachmentsStrip(): void {
     bindAttachmentOpenClicks();
 }
 
+function updateComposerToolbar(): void {
+    const input = document.getElementById('input') as HTMLTextAreaElement | null;
+    const text = input?.value.trim() ?? '';
+    const canSend = hasSendableInput(text);
+
+    const steerBtn = document.getElementById('btn-steer');
+    const sendBtn = document.getElementById('btn-send') as HTMLButtonElement | null;
+
+    if (steerBtn) {
+        steerBtn.hidden = !state.isStreaming;
+    }
+    if (sendBtn) {
+        const showStop = state.isStreaming && !composerEdit && !canSend;
+        const showQueue = state.isStreaming && !composerEdit && canSend;
+        sendBtn.classList.toggle('composer-action-btn--as-stop', showStop);
+        sendBtn.classList.toggle('composer-action-btn--as-queue', showQueue);
+        const sendIcon = sendBtn.querySelector('.composer-btn-icon--send') as HTMLElement | null;
+        const stopIcon = sendBtn.querySelector('.composer-btn-icon--stop') as HTMLElement | null;
+        if (sendIcon) {
+            sendIcon.hidden = showStop;
+        }
+        if (stopIcon) {
+            stopIcon.hidden = !showStop;
+        }
+        if (composerEdit) {
+            sendBtn.title = 'Send as new (⌘↵ fork)';
+            sendBtn.setAttribute('aria-label', 'Send as new message');
+        } else if (showStop) {
+            sendBtn.title = 'Stop (Esc)';
+            sendBtn.setAttribute('aria-label', 'Stop generation');
+        } else if (showQueue) {
+            sendBtn.title = 'Queue message (Enter)';
+            sendBtn.setAttribute('aria-label', 'Queue message while Pi is working');
+        } else {
+            sendBtn.title = 'Send (Enter)';
+            sendBtn.setAttribute('aria-label', 'Send message');
+        }
+        const disabled = !state.isStreaming && !canSend;
+        sendBtn.toggleAttribute('disabled', disabled);
+        sendBtn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+    }
+}
+
+function requestAbort(): void {
+    state.isStreaming = false;
+    state.streamingText = '';
+    state.streamingThinking = '';
+    state.isThinking = false;
+    state.connectionStatus = { phase: 'idle' };
+    setStreamPhase('idle');
+    updateStreamingUI();
+    updateInputArea();
+    updateConnectionBanner();
+    vscode.postMessage({ type: 'abort' });
+}
+
+function handleSendButtonClick(): void {
+    const input = document.getElementById('input') as HTMLTextAreaElement | null;
+    if (state.isStreaming) {
+        const text = input?.value.trim() ?? '';
+        if (hasSendableInput(text)) {
+            const attachmentCount = state.pendingAttachments.length;
+            if (text || attachmentCount > 0) {
+                appendOptimisticUserMessage(text, attachmentCount);
+            }
+            state.pendingAttachments = [];
+            updateAttachmentsStrip();
+            vscode.postMessage({ type: 'queueMessage', text });
+            if (input) {
+                input.value = '';
+                input.style.height = 'auto';
+            }
+            updateComposerToolbar();
+        } else {
+            requestAbort();
+        }
+        return;
+    }
+    sendMessage();
+}
+
+function handleSteerButtonClick(): void {
+    const input = document.getElementById('input') as HTMLTextAreaElement | null;
+    const text = input?.value.trim() ?? '';
+    if (!hasSendableInput(text)) {
+        return;
+    }
+    vscode.postMessage({ type: 'steer', text });
+    if (input) {
+        input.value = '';
+        input.style.height = 'auto';
+    }
+    updateComposerToolbar();
+}
+
 function updateInputArea(): void {
+    updateComposerEditBanner();
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
     if (input) {
-        input.placeholder = state.isStreaming
-            ? 'Type to queue a message, Ctrl+Enter to steer, Esc to stop...'
+        input.placeholder = composerEdit
+            ? 'Enter = send as new · ⌘↵ = fork & send · Esc = cancel'
+            : state.isStreaming
+            ? 'Queue with Enter · Ctrl+Enter steer · Esc or ■ button to stop...'
             : state.planMode.enabled
               ? 'Plan mode: describe what to build (read-only until you implement)...'
               : 'Ask Pi anything...';
     }
 
-    const footer = document.querySelector('.input-footer');
-    if (!footer) return;
-
-    const modelName = state.model?.name ?? state.model?.id ?? '';
-    const footerTokens = renderFooterTokenSummary(state.contextUsage, state.sessionTokens);
-
-    const steerBtnHtml = state.isStreaming
-        ? `<button id="btn-steer" class="steer-btn" title="Steer (Ctrl+Enter)"><img class="steer-icon-img" src="${iconsBaseUri}/chevrons.svg" alt="steer"></button>`
-        : '';
-
-    footer.innerHTML = `
-        <button id="btn-attach" class="attach-btn" type="button" title="Attach files · @ for workspace paths · Explorer: hold Shift while dropping here">&#128206;</button>
-        <span class="footer-drop-tip" title="From Explorer: hold Shift while dropping on the message box. Or right-click → Add to Chat (no Shift).">Explorer: <kbd>Shift</kbd>+drop</span>
-        <span class="footer-model">${escHtml(modelName)}</span>
-        ${footerTokens}
-        <span class="footer-spacer"></span>
-        ${state.isStreaming ? '<button id="btn-abort" class="abort-btn" title="Stop generation (Esc)">&#9632; Stop</button>' : ''}
-        ${steerBtnHtml}
-        <button id="btn-send" class="send-btn" title="${state.isStreaming ? 'Queue' : 'Send'}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3L8 13M8 3L3 8M8 3L13 8" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-    `;
-
-    document.getElementById('btn-attach')?.addEventListener('click', () => {
-        vscode.postMessage({ type: 'pickAttachments' });
-    });
-
-    // Rebind the dynamic footer elements
-    const sendBtn = document.getElementById('btn-send');
-    sendBtn?.addEventListener('click', () => {
-        if (state.isStreaming) {
-            const text = input?.value.trim() ?? '';
-            if (hasSendableInput(text)) {
-                vscode.postMessage({ type: 'queueMessage', text });
-                if (input) { input.value = ''; input.style.height = 'auto'; }
-            } else {
-                vscode.postMessage({ type: 'abort' });
-            }
-        } else {
-            sendMessage();
-        }
-    });
-
-    const steerBtn = document.getElementById('btn-steer');
-    steerBtn?.addEventListener('click', () => {
-        const text = input?.value.trim() ?? '';
-        if (hasSendableInput(text)) {
-            vscode.postMessage({ type: 'steer', text });
-            if (input) { input.value = ''; input.style.height = 'auto'; }
-            showSteerToast(text || '(attachments)');
-        }
-    });
-
-    const abortBtn = document.getElementById('btn-abort');
-    abortBtn?.addEventListener('click', () => vscode.postMessage({ type: 'abort' }));
-
-    document.querySelector('.footer-model')?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggleModelPicker();
-    });
-
+    updateComposerToolbar();
     updateQueuedMessageBanner();
+    updateConnectionBanner();
+}
+
+function updateConnectionBanner(): void {
+    const container = document.querySelector('.input-container');
+    if (!container) {
+        return;
+    }
+
+    const existing = document.getElementById('connection-banner');
+    const cs = state.connectionStatus ?? { phase: 'idle' };
+
+    if (cs.phase === 'idle') {
+        existing?.remove();
+        return;
+    }
+
+    const attemptLabel =
+        cs.phase === 'retrying' && cs.attempt != null && cs.maxAttempts != null
+            ? ` (${cs.attempt}/${cs.maxAttempts})`
+            : cs.phase === 'retrying' && cs.attempt != null
+              ? ` (attempt ${cs.attempt})`
+              : '';
+
+    const title =
+        cs.phase === 'retrying'
+            ? `Reconnecting${attemptLabel}…`
+            : 'Connection failed';
+
+    const detail = cs.message ? escHtml(truncate(cs.message, 200)) : '';
+
+    let banner = existing;
+    if (!banner) {
+        banner = el('div', `connection-banner connection-banner-${cs.phase}`);
+        banner.id = 'connection-banner';
+        const inputArea = container.querySelector('.input-area');
+        if (inputArea) {
+            container.insertBefore(banner, inputArea);
+        } else {
+            container.appendChild(banner);
+        }
+    } else {
+        banner.className = `connection-banner connection-banner-${cs.phase}`;
+    }
+
+    banner.innerHTML =
+        cs.phase === 'retrying'
+            ? `<span class="connection-banner-spinner"></span>
+               <span class="connection-banner-title">${escHtml(title)}</span>
+               ${detail ? `<span class="connection-banner-detail">${detail}</span>` : ''}`
+            : `<span class="connection-banner-title">${escHtml(title)}</span>
+               ${detail ? `<span class="connection-banner-detail">${detail}</span>` : ''}`;
 }
 
 let queuedEditingIndex = -1;
+
+/** When set, composer is editing a sent user message (resend via banner). */
+interface ComposerEditState {
+    messageIndex: number;
+    entryId?: string;
+    originalText: string;
+}
+let composerEdit: ComposerEditState | null = null;
+
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
 function updateQueuedMessageBanner(): void {
     const section = document.getElementById('queued-section') as HTMLDetailsElement | null;
@@ -861,34 +1552,44 @@ function bindQueuedItemEvents(section: HTMLElement): void {
     });
 }
 
-function showSteerToast(text: string): void {
-    const existing = document.getElementById('steer-toast');
-    if (existing) existing.remove();
-
-    const container = document.querySelector('.input-container');
-    if (!container) return;
-
-    const toast = el('div', 'steer-toast');
-    toast.id = 'steer-toast';
-    toast.innerHTML = `
-        <span class="steer-toast-indicator"></span>
-        <span class="steer-toast-label">Steering...</span>
-        <span class="steer-toast-text">${escHtml(truncate(text, 80))}</span>
-    `;
-
-    const inputArea = container.querySelector('.input-area');
-    if (inputArea) {
-        container.insertBefore(toast, inputArea);
-    } else {
-        container.appendChild(toast);
+function updatePendingMessagesInChat(): void {
+    const container = document.getElementById('pending-messages');
+    if (!container) {
+        return;
     }
-}
 
-function dismissSteerToast(): void {
-    const toast = document.getElementById('steer-toast');
-    if (!toast) return;
-    toast.classList.add('steer-toast-fade');
-    setTimeout(() => toast.remove(), 300);
+    const steering = state.steeringMessages ?? [];
+    const followUp = state.followUpMessages ?? [];
+    if (steering.length === 0 && followUp.length === 0) {
+        container.innerHTML = '';
+        container.style.display = 'none';
+        return;
+    }
+
+    container.style.display = '';
+    const rows: string[] = [];
+    for (const text of steering) {
+        rows.push(
+            `<div class="pending-message pending-message--steer">
+                <span class="pending-message-indicator" aria-hidden="true"></span>
+                <span class="pending-message-label">Steering</span>
+                <span class="pending-message-text">${escHtml(text)}</span>
+            </div>`,
+        );
+    }
+    for (const text of followUp) {
+        rows.push(
+            `<div class="pending-message pending-message--followup">
+                <span class="pending-message-indicator" aria-hidden="true"></span>
+                <span class="pending-message-label">Follow-up</span>
+                <span class="pending-message-text">${escHtml(text)}</span>
+            </div>`,
+        );
+    }
+    container.innerHTML = rows.join('');
+    if (!userHasScrolled) {
+        scrollToBottom();
+    }
 }
 
 function buildWelcome(): HTMLElement {
@@ -901,7 +1602,7 @@ function buildWelcome(): HTMLElement {
             <div class="welcome-hint">Type a message to start</div>
             <div class="welcome-hint"><kbd>Ctrl+Shift+L</kbd> Focus chat</div>
             <div class="welcome-hint"><kbd>Ctrl+Shift+N</kbd> New session</div>
-            <div class="welcome-hint"><kbd>Esc</kbd> Stop generation</div>
+            <div class="welcome-hint"><kbd>Enter</kbd> Send · while running, same button stops</div>
         </div>
     `;
     return w;
@@ -1072,7 +1773,7 @@ function renderInlineFileChange(change: FileChangeInfo): void {
     }
 
     bindDiffButtons();
-    scrollToBottom();
+    scrollIfFollowing();
 }
 
 // ── Inline diff card ──
@@ -1228,7 +1929,295 @@ function resolveImageOpenPath(
     return imagePathsByBase.get(base) ?? imagePathsByBase.get(filePath.toLowerCase());
 }
 
-function renderMessage(msg: any, index: number, turnNumber?: number): HTMLElement {
+function showToast(message: string, variant: 'info' | 'error' = 'info'): void {
+    let toast = document.getElementById('chat-toast');
+    if (!toast) {
+        toast = el('div', 'chat-toast');
+        toast.id = 'chat-toast';
+        document.getElementById('app')?.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.className = `chat-toast chat-toast--${variant}`;
+    toast.style.display = '';
+    if (toastTimer) {
+        clearTimeout(toastTimer);
+    }
+    toastTimer = setTimeout(() => {
+        toast!.style.display = 'none';
+    }, 2200);
+}
+
+function copyPlainText(text: string): void {
+    const t = text.trim();
+    if (!t) {
+        return;
+    }
+    void navigator.clipboard.writeText(t).then(() => {
+        showToast('Copied to clipboard');
+    });
+}
+
+function getUserMessagePlainForCopy(msg: any): string {
+    const raw = extractText(msg);
+    const { displayText } = parseUserMessageForDisplay(raw);
+    return displayText || raw;
+}
+
+function getAssistantPlainForCopy(msg: any): string {
+    let text = extractText(msg);
+    if (text) {
+        text = stripPlanContentForChatDisplay(text);
+    }
+    return text;
+}
+
+function findLastUserMessageIndex(): number {
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+        if ((state.messages[i]?.role ?? '') === 'user') {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function findPrecedingUserIndex(assistantIndex: number): number {
+    for (let i = Math.min(assistantIndex, state.messages.length - 1); i >= 0; i--) {
+        if ((state.messages[i]?.role ?? '') === 'user') {
+            return i;
+        }
+    }
+    return -1;
+}
+
+function loadLastUserMessageToComposer(): void {
+    const idx = findLastUserMessageIndex();
+    if (idx < 0) {
+        return;
+    }
+    const msg = state.messages[idx];
+    const text = getUserMessagePlainForCopy(msg);
+    const entryId = typeof msg._forkEntryId === 'string' ? msg._forkEntryId : undefined;
+    startComposerEdit(idx, text, entryId);
+}
+
+function startComposerEdit(messageIndex: number, text: string, entryId?: string): void {
+    composerEdit = { messageIndex, entryId, originalText: text };
+    const input = document.getElementById('input') as HTMLTextAreaElement | null;
+    if (input) {
+        input.value = text;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.focus();
+        input.setSelectionRange(text.length, text.length);
+    }
+    updateComposerEditBanner();
+    updateInputArea();
+}
+
+function clearComposerEdit(): void {
+    composerEdit = null;
+    updateComposerEditBanner();
+    updateInputArea();
+}
+
+function updateComposerEditBanner(): void {
+    const banner = document.getElementById('composer-edit-banner');
+    if (!banner) {
+        return;
+    }
+    if (!composerEdit) {
+        banner.style.display = 'none';
+        banner.innerHTML = '';
+        return;
+    }
+    banner.style.display = '';
+    const hasFork = !!composerEdit.entryId;
+    banner.innerHTML = `
+        <span class="composer-edit-label">Editing · Enter = new · ⌘↵ = fork</span>
+        <div class="composer-edit-actions">
+            <button type="button" class="composer-edit-btn" data-send-mode="new" title="Send as new message (Enter)">Send as new</button>
+            <button type="button" class="composer-edit-btn composer-edit-btn--fork" data-send-mode="fork" title="Fork from this point (⌘↵)" ${hasFork ? '' : 'disabled'}>Fork &amp; send</button>
+            <button type="button" class="composer-edit-btn composer-edit-btn--ghost" data-cancel-edit>Cancel</button>
+        </div>
+    `;
+    if (!hasFork) {
+        banner.querySelector('[data-send-mode="fork"]')?.setAttribute(
+            'title',
+            'Fork unavailable for this message — use Send as new',
+        );
+    }
+    banner.querySelectorAll('[data-send-mode]').forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            const mode = (btn as HTMLElement).dataset.sendMode as 'new' | 'fork';
+            if (mode) {
+                submitComposerEdit(mode);
+            }
+        });
+    });
+    banner.querySelector('[data-cancel-edit]')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        clearComposerEdit();
+    });
+}
+
+function submitComposerEdit(mode: 'new' | 'fork'): void {
+    if (!composerEdit) {
+        return;
+    }
+    const input = document.getElementById('input') as HTMLTextAreaElement | null;
+    const text = input?.value.trim() ?? '';
+    if (!text) {
+        showToast('Message is empty', 'error');
+        return;
+    }
+    const { messageIndex, entryId } = composerEdit;
+    composerEdit = null;
+    updateComposerEditBanner();
+    if (input) {
+        input.value = '';
+        input.style.height = 'auto';
+    }
+    appendOptimisticUserMessage(text, 0);
+    vscode.postMessage({
+        type: 'resendUserMessage',
+        messageIndex,
+        text,
+        mode,
+        entryId,
+    });
+}
+
+function postResendUserMessage(messageIndex: number, text: string, mode: 'new' | 'fork', entryId?: string): void {
+    const trimmed = text.trim();
+    if (!trimmed) {
+        return;
+    }
+    appendOptimisticUserMessage(trimmed, 0);
+    vscode.postMessage({ type: 'resendUserMessage', messageIndex, text: trimmed, mode, entryId });
+}
+
+function postRegenerateAssistant(assistantMessageIndex: number, mode: 'new' | 'fork'): void {
+    vscode.postMessage({ type: 'regenerateAssistant', assistantMessageIndex, mode });
+}
+
+function buildMessageActions(role: 'user' | 'assistant', index: number, msg: any): HTMLElement {
+    const bar = el('div', 'message-actions');
+    bar.dataset.msgIndex = String(index);
+    bar.dataset.role = role;
+
+    const copyBtn = el('button', 'msg-action');
+    copyBtn.type = 'button';
+    copyBtn.dataset.action = 'copy';
+    copyBtn.title = 'Copy';
+    copyBtn.textContent = '⎘';
+    copyBtn.classList.add('msg-action--icon');
+
+    bar.appendChild(copyBtn);
+
+    if (role === 'user') {
+        const editBtn = el('button', 'msg-action');
+        editBtn.type = 'button';
+        editBtn.dataset.action = 'edit';
+        editBtn.title = 'Edit in composer';
+        editBtn.innerHTML = `<img class="msg-action-icon" src="${iconsBaseUri}/pencil.svg" alt="">`;
+        bar.appendChild(editBtn);
+
+        const resendNew = el('button', 'msg-action');
+        resendNew.type = 'button';
+        resendNew.dataset.action = 'resend-new';
+        resendNew.title = 'Send again (new message at end)';
+        resendNew.textContent = 'Resend';
+        bar.appendChild(resendNew);
+
+        const resendFork = el('button', 'msg-action msg-action--fork');
+        resendFork.type = 'button';
+        resendFork.dataset.action = 'resend-fork';
+        resendFork.title = 'Fork from here and send';
+        resendFork.textContent = 'Fork';
+        if (!msg._forkEntryId) {
+            resendFork.disabled = true;
+            resendFork.title = 'Fork unavailable — use Resend';
+        }
+        bar.appendChild(resendFork);
+    } else {
+        const regenNew = el('button', 'msg-action msg-action--icon');
+        regenNew.type = 'button';
+        regenNew.dataset.action = 'regenerate-new';
+        regenNew.title = 'Regenerate response';
+        regenNew.textContent = '↻';
+        bar.appendChild(regenNew);
+    }
+
+    return bar;
+}
+
+function bindMessageActionButtons(): void {
+    document.querySelectorAll('.message-actions:not([data-actions-bound])').forEach((bar) => {
+        bar.setAttribute('data-actions-bound', '1');
+        const index = parseInt((bar as HTMLElement).dataset.msgIndex ?? '-1', 10);
+        const role = (bar as HTMLElement).dataset.role;
+        if (index < 0) {
+            return;
+        }
+        const msg = state.messages[index];
+        if (!msg) {
+            return;
+        }
+
+        bar.querySelectorAll('.msg-action').forEach((btn) => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                const action = (btn as HTMLElement).dataset.action;
+                if (action === 'copy') {
+                    const text =
+                        role === 'user' ? getUserMessagePlainForCopy(msg) : getAssistantPlainForCopy(msg);
+                    copyPlainText(text);
+                    return;
+                }
+                if (action === 'edit' && role === 'user') {
+                    const text = getUserMessagePlainForCopy(msg);
+                    const entryId =
+                        typeof msg._forkEntryId === 'string' ? msg._forkEntryId : undefined;
+                    startComposerEdit(index, text, entryId);
+                    return;
+                }
+                if (action === 'resend-new' && role === 'user') {
+                    const text = getUserMessagePlainForCopy(msg);
+                    postResendUserMessage(index, text, 'new', msg._forkEntryId);
+                    return;
+                }
+                if (action === 'resend-fork' && role === 'user') {
+                    const text = getUserMessagePlainForCopy(msg);
+                    const entryId =
+                        typeof msg._forkEntryId === 'string' ? msg._forkEntryId : undefined;
+                    if (!entryId) {
+                        showToast('Fork unavailable for this message', 'error');
+                        return;
+                    }
+                    postResendUserMessage(index, text, 'fork', entryId);
+                    return;
+                }
+                if (action === 'regenerate-new' && role === 'assistant') {
+                    postRegenerateAssistant(index, 'new');
+                    return;
+                }
+            });
+        });
+    });
+}
+
+type RenderMessageOptions = {
+    /** Hide per-message Thought rows (turn-level merge handles thinking). */
+    suppressThinking?: boolean;
+};
+
+function renderMessage(
+    msg: any,
+    index: number,
+    turnNumber?: number,
+    options?: RenderMessageOptions,
+): HTMLElement {
     const role = msg.role ?? 'unknown';
 
     if (role === 'toolResult' || role === 'tool') {
@@ -1244,6 +2233,8 @@ function renderMessage(msg: any, index: number, turnNumber?: number): HTMLElemen
 
     if (role === 'user') {
         const group = el('div', 'message-group-user');
+        const card = el('div', 'user-prompt-card');
+        card.appendChild(buildMessageActions('user', index, msg));
 
         const wrapper = el('div', `message message-${role}`);
         if (turnNumber !== undefined && !state.isStreaming) {
@@ -1282,7 +2273,8 @@ function renderMessage(msg: any, index: number, turnNumber?: number): HTMLElemen
         if (fileAttachments.length > 0) {
             wrapper.appendChild(buildMessageAttachmentChips(fileAttachments));
         }
-        group.appendChild(wrapper);
+        card.appendChild(wrapper);
+        group.appendChild(card);
 
         const footer = buildMessageFooter(msg, index);
         if (footer) {
@@ -1293,33 +2285,74 @@ function renderMessage(msg: any, index: number, turnNumber?: number): HTMLElemen
     }
 
     // Assistant messages: wrap in a styled container
-    const thinking = extractThinking(msg);
-    let text = extractText(msg);
-    if (role === 'assistant' && text) {
-        text = stripPlanContentForChatDisplay(text);
+    const group = el('div', 'message-group-assistant');
+    const wrapper = el('div', `message message-${role}`);
+    let hasVisibleAssistantContent = false;
+
+    if (Array.isArray(msg.content)) {
+        const thinkingMerged = extractThinking(msg).trim();
+        if (!options?.suppressThinking && thinkingMerged) {
+            wrapper.appendChild(
+                buildThinkingBlock(thinkingMerged, false, msg._thinkingDurationSec, `${index}:0`),
+            );
+            hasVisibleAssistantContent = true;
+        }
+        for (let i = 0; i < msg.content.length; i++) {
+            const block = msg.content[i];
+            if (block?.type === 'thinking' || block?.type === 'redacted_thinking') {
+                continue;
+            } else if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+                let blockText = stripPlanContentForChatDisplay(block.text);
+                if (blockText.trim()) {
+                    const content = el('div', 'message-content');
+                    content.innerHTML = renderMarkdown(blockText);
+                    wrapper.appendChild(content);
+                    hasVisibleAssistantContent = true;
+                }
+            }
+        }
+    } else {
+        const thinking = extractThinking(msg);
+        let text = extractText(msg);
+        if (text) {
+            text = stripPlanContentForChatDisplay(text);
+        }
+        if (!options?.suppressThinking && thinking.trim()) {
+            wrapper.appendChild(
+                buildThinkingBlock(thinking, false, msg._thinkingDurationSec, `${index}:0`),
+            );
+            hasVisibleAssistantContent = true;
+        }
+        if (text) {
+            const content = el('div', 'message-content');
+            content.innerHTML = renderMarkdown(text);
+            wrapper.appendChild(content);
+            hasVisibleAssistantContent = true;
+        }
     }
 
-    if (!thinking && !text) {
+    const isAssistantError = role === 'assistant' && msg.stopReason === 'error';
+    const errorText =
+        isAssistantError &&
+        typeof msg.errorMessage === 'string' &&
+        msg.errorMessage.trim()
+            ? msg.errorMessage.trim()
+            : '';
+
+    if (!hasVisibleAssistantContent && !errorText) {
         const empty = el('div');
         empty.style.display = 'none';
         return empty;
     }
 
-    const group = el('div', 'message-group-assistant');
-
-    const wrapper = el('div', `message message-${role}`);
-
-    if (thinking) {
-        wrapper.appendChild(buildThinkingBlock(thinking, false, msg._thinkingDurationSec));
-    }
-
-    if (text) {
-        const content = el('div', 'message-content');
-        content.innerHTML = renderMarkdown(text);
-        wrapper.appendChild(content);
+    if (errorText) {
+        const errBlock = el('div', 'message-error');
+        errBlock.textContent = errorText;
+        wrapper.appendChild(errBlock);
     }
 
     group.appendChild(wrapper);
+    group.appendChild(buildMessageActions('assistant', index, msg));
 
     const footer = buildMessageFooter(msg, index);
     if (footer) {
@@ -1348,84 +2381,102 @@ function findFileChangeForToolResult(msg: any): FileChangeInfo | undefined {
     return undefined;
 }
 
-function removePreparingPlaceholder(): void {
-    document.getElementById('preparing-placeholder')?.remove();
-}
-
-function showPreparingPlaceholder(): void {
-    const container = document.getElementById('streaming-message');
-    if (!container) return;
-    if (document.getElementById('preparing-placeholder')) return;
-    const ph = el('div', 'preparing-placeholder');
-    ph.id = 'preparing-placeholder';
-    ph.textContent = 'Preparing next moves...';
-    container.appendChild(ph);
-    scrollToBottom();
-}
-
-function ensurePreparingPlaceholder(): void {
-    const container = document.getElementById('streaming-message');
-    if (!container) return;
-    const hasRunningTool = container.querySelector('.tool-status.running');
-    if (!hasRunningTool) {
-        showPreparingPlaceholder();
+function ensureStreamingMessageShell(container: HTMLElement): void {
+    if (container.querySelector('.message.message-assistant')) {
+        return;
     }
+    const msg = el('div', 'message message-assistant');
+    msg.innerHTML = `
+        <details class="thinking-block" id="streaming-thinking">
+            <summary class="thinking-summary">
+                <span class="thinking-indicator"></span>
+                <span class="thinking-label">Thinking…</span>
+                <span class="thinking-chevron">&#9656;</span>
+            </summary>
+            <div class="thinking-content"></div>
+        </details>
+        <div class="message-content" id="streaming-text"></div>
+    `;
+    const firstTool = container.querySelector(
+        '.tool-card, .tool-card-wrapper, .diff-card, .tool-approval-card',
+    );
+    if (firstTool) {
+        container.insertBefore(msg, firstTool);
+    } else {
+        const activity = document.getElementById('stream-activity');
+        if (activity) {
+            activity.insertAdjacentElement('afterend', msg);
+        } else {
+            container.prepend(msg);
+        }
+    }
+    const created = document.getElementById('streaming-thinking') as HTMLDetailsElement | null;
+    created?.addEventListener('toggle', () => {
+        streamingThinkingUserOpen = created.open;
+    });
 }
 
 function renderStreamingContent(): void {
     const container = document.getElementById('streaming-message');
     if (!container) return;
 
-    if (!state.streamingText && !state.streamingThinking) return;
-    removePreparingPlaceholder();
+    const streamingThinkingText = state.streamingThinking.trim();
+    const showThinkingBlock = streamingThinkingBlockVisible();
+    const showText = Boolean(state.streamingText);
 
-    if (!container.querySelector('.message')) {
-        container.innerHTML = `
-            <div class="message message-assistant">
-                <details class="thinking-block active" open id="streaming-thinking" style="display:none">
-                    <summary class="thinking-summary">
-                        <span class="thinking-indicator"></span>
-                        <span class="thinking-label">Thinking...</span>
-                        <span class="thinking-chevron">&#9656;</span>
-                    </summary>
-                    <div class="thinking-content"></div>
-                </details>
-                <div class="message-content" id="streaming-text"></div>
-            </div>
-        `;
+    if (!showThinkingBlock && !showText) {
+        return;
     }
+
+    ensureStreamingMessageShell(container);
 
     const thinkingEl = document.getElementById('streaming-thinking') as HTMLDetailsElement | null;
     if (thinkingEl) {
-        if (state.streamingThinking) {
-            thinkingEl.style.display = '';
+        thinkingEl.style.display = showThinkingBlock ? '' : 'none';
+        if (showThinkingBlock) {
             const contentEl = thinkingEl.querySelector('.thinking-content');
-            if (contentEl) contentEl.innerHTML = renderMarkdown(state.streamingThinking);
+            if (contentEl) {
+                if (streamingThinkingText) {
+                    contentEl.innerHTML = renderMarkdown(streamingThinkingText);
+                } else {
+                    contentEl.innerHTML =
+                        '<p class="thinking-placeholder">Reasoning in progress…</p>';
+                }
+            }
             const labelEl = thinkingEl.querySelector('.thinking-label');
             if (state.isThinking) {
                 thinkingEl.classList.add('active');
-                if (labelEl) labelEl.textContent = 'Thinking...';
+                if (labelEl) labelEl.textContent = 'Thinking…';
             } else {
                 thinkingEl.classList.remove('active');
                 if (labelEl) {
                     const dur = state.streamingThinkingDuration;
-                    labelEl.textContent = dur > 0
-                        ? `Thought for ${dur} second${dur !== 1 ? 's' : ''}`
-                        : 'Thought';
+                    labelEl.textContent =
+                        dur > 0
+                            ? `Thought for ${dur} second${dur !== 1 ? 's' : ''}`
+                            : 'Thought';
                 }
             }
-        } else {
-            thinkingEl.style.display = 'none';
+            if (streamingThinkingUserOpen) {
+                thinkingEl.open = true;
+            }
         }
     }
 
     const textEl = document.getElementById('streaming-text');
     if (textEl) {
-        textEl.innerHTML = renderMarkdown(state.streamingText);
+        textEl.style.display = showText ? '' : 'none';
+        if (showText) {
+            if (state.isStreaming) {
+                textEl.textContent = state.streamingText;
+            } else {
+                textEl.innerHTML = renderMarkdown(state.streamingText);
+            }
+        }
     }
 
     bindCopyButtons();
-    scrollToBottom();
+    scrollIfFollowing();
 }
 
 // ── Tool rendering ──
@@ -1634,11 +2685,132 @@ function findToolCallInMessages(messages: any[], beforeIndex: number, toolCallId
     return undefined;
 }
 
+const toolsOpenByKey = new Map<string, boolean>();
+
+function captureToolsOpenState(): void {
+    document.querySelectorAll('details.tools-block[data-tools-key]').forEach((node) => {
+        const el = node as HTMLDetailsElement;
+        const key = el.dataset.toolsKey;
+        if (key) {
+            toolsOpenByKey.set(key, el.open);
+        }
+    });
+}
+
+function clearStreamingToolArtifacts(): void {
+    const container = document.getElementById('streaming-message');
+    if (!container) {
+        return;
+    }
+    container
+        .querySelectorAll(
+            '.tool-card, .tool-card-wrapper, .tool-expandable, .diff-card, .tool-approval-card',
+        )
+        .forEach((node) => node.remove());
+}
+
+function buildMergedToolRow(msg: any, msgIndex: number, allMessages: any[]): HTMLElement {
+    const isError = msg.isError ?? false;
+    const toolName = msg.toolName ?? '';
+    const toolCallId = msg.toolCallId ?? '';
+    const nameLower = toolName.toLowerCase();
+
+    const matchingCall = findToolCallInMessages(allMessages, msgIndex, toolCallId);
+    const args = matchingCall?.arguments ?? matchingCall?.args ?? matchingCall?.input ?? {};
+    const parsedArgs = typeof args === 'string' ? tryParseJSON(args) : args;
+    const label = toolName ? getToolLabel(toolName, parsedArgs) : 'Tool Result';
+    const icon = getToolIcon(toolName ?? '');
+    const isBash = nameLower === 'bash';
+    const isRead = nameLower === 'read';
+    const filePath = parsedArgs?.path ?? parsedArgs?.file_path ?? '';
+
+    const resultContent = extractText(msg);
+    const hasBody = !!(resultContent || isBash) && !isRead;
+
+    if (hasBody) {
+        const details = document.createElement('details');
+        details.className = 'tools-item tools-item-expandable';
+
+        details.innerHTML = `
+            <summary class="tool-header">
+                <span class="tool-icon">${icon}</span>
+                <span class="tool-name">${escHtml(label)}</span>
+                ${buildStatusHtml(isError ? 'error' : 'done')}
+                <span class="tool-expand-arrow">&#9656;</span>
+            </summary>
+        `;
+
+        const body = el('div', 'tool-body');
+        const result = el('pre', 'tool-result');
+        result.textContent = resultContent || '(no output)';
+        if (!resultContent) {
+            result.classList.add('empty');
+        }
+        body.appendChild(result);
+        details.appendChild(body);
+        return details;
+    }
+
+    const row = el('div', `tools-item tool-card${isRead ? ' tool-clickable' : ''}`);
+    if (isRead && filePath) {
+        row.dataset.filepath = filePath;
+    }
+    row.innerHTML = `
+        <div class="tool-header">
+            <span class="tool-icon">${icon}</span>
+            <span class="tool-name">${escHtml(label)}</span>
+            ${buildStatusHtml(isError ? 'error' : 'done')}
+        </div>
+    `;
+    return row;
+}
+
+function buildMergedToolsBlock(
+    items: Array<{ msg: any; index: number }>,
+    allMessages: any[],
+    turnUserMsgCount: number,
+): HTMLElement {
+    const details = document.createElement('details');
+    details.className = 'tools-block';
+    const toolsKey = `turn:${turnUserMsgCount}`;
+    details.dataset.toolsKey = toolsKey;
+    if (toolsOpenByKey.has(toolsKey)) {
+        details.open = toolsOpenByKey.get(toolsKey)!;
+    }
+
+    const count = items.length;
+    const summary = document.createElement('summary');
+    summary.className = 'tools-summary';
+    summary.innerHTML = `
+        <span class="tools-indicator"></span>
+        <span class="tools-label">Used ${count} tool${count !== 1 ? 's' : ''}</span>
+        <span class="tools-chevron">&#9656;</span>
+    `;
+
+    const list = el('div', 'tools-list');
+    for (const item of items) {
+        list.appendChild(buildMergedToolRow(item.msg, item.index, allMessages));
+    }
+
+    details.appendChild(summary);
+    details.appendChild(list);
+    details.addEventListener('toggle', () => {
+        toolsOpenByKey.set(toolsKey, details.open);
+    });
+    return details;
+}
+
 function renderToolStart(event: any): void {
     const container = document.getElementById('streaming-message');
     if (!container) return;
 
     if ((event.toolName ?? '').toLowerCase() === 'todo') {
+        return;
+    }
+
+    // Simple tools: status bar only — avoid stacking dozens of rows during streaming.
+    const nameLower = (event.toolName ?? '').toLowerCase();
+    if (nameLower !== 'edit' && nameLower !== 'write') {
         return;
     }
 
@@ -1654,31 +2826,8 @@ function renderToolStart(event: any): void {
             </div>
         `;
         container.appendChild(card);
-        scrollToBottom();
-        return;
+        scrollIfFollowing();
     }
-
-    const parsedArgs = typeof event.args === 'string' ? tryParseJSON(event.args) : event.args;
-    const nameLower = (event.toolName ?? '').toLowerCase();
-    const isRead = nameLower === 'read';
-    const filePath = parsedArgs?.path ?? parsedArgs?.file_path ?? '';
-
-    const card = el('div', `tool-card${isRead ? ' tool-clickable' : ''}`);
-    card.id = `tool-${event.toolCallId}`;
-    card.dataset.toolName = event.toolName;
-    if (isRead && filePath) card.dataset.filepath = filePath;
-
-    card.innerHTML = `
-        <div class="tool-header">
-            <span class="tool-icon">${getToolIcon(event.toolName)}</span>
-            <span class="tool-name">${escHtml(getToolLabel(event.toolName, parsedArgs))}</span>
-            <span class="tool-status running">running</span>
-        </div>
-    `;
-
-    container.appendChild(card);
-    bindToolClickable();
-    scrollToBottom();
 }
 
 function renderToolUpdate(event: any): void {
@@ -1693,7 +2842,7 @@ function renderToolUpdate(event: any): void {
         card.appendChild(resultEl);
     }
     resultEl.textContent = text;
-    scrollToBottom();
+    scrollIfFollowing();
 }
 
 function renderToolEnd(event: any): void {
@@ -1768,8 +2917,6 @@ function renderToolApprovalCard(pending: ToolCallPendingInfo): void {
     const container = document.getElementById('streaming-message');
     if (!container) return;
 
-    removePreparingPlaceholder();
-
     const existing = document.getElementById(`approval-${pending.toolCallId}`);
     if (existing) return;
 
@@ -1794,7 +2941,7 @@ function renderToolApprovalCard(pending: ToolCallPendingInfo): void {
 
     container.appendChild(card);
     bindApprovalButtons();
-    scrollToBottom();
+    scrollIfFollowing();
 }
 
 function removeToolApprovalCard(toolCallId: string): void {
@@ -1820,25 +2967,137 @@ function bindApprovalButtons(): void {
 
 // ── Thinking block ──
 
-function buildThinkingBlock(text: string, active: boolean, durationSec?: number): HTMLElement {
+const thinkingOpenByKey = new Map<string, boolean>();
+
+function captureThinkingOpenState(): void {
+    document.querySelectorAll('details.thinking-block[data-think-key]').forEach((node) => {
+        const el = node as HTMLDetailsElement;
+        const key = el.dataset.thinkKey;
+        if (key) {
+            thinkingOpenByKey.set(key, el.open);
+        }
+    });
+}
+
+function thinkingBlockText(block: any): string {
+    if (!block || typeof block !== 'object') {
+        return '';
+    }
+    if (block.type === 'redacted_thinking') {
+        return typeof block.data === 'string' && block.data.trim()
+            ? block.data
+            : '[Thinking redacted by provider]';
+    }
+    if (block.type === 'thinking') {
+        return block.thinking ?? block.text ?? '';
+    }
+    return '';
+}
+
+function syncThinkingFromAssistantMessage(msg: any): void {
+    if (msg?.role !== 'assistant') {
+        return;
+    }
+    const fromMsg = extractThinking(msg);
+    if (fromMsg.length > state.streamingThinking.length) {
+        state.streamingThinking = fromMsg;
+    }
+}
+
+function assistantMessageAlreadyShowsThinking(streamingText: string): boolean {
+    if (!streamingText || state.isStreaming) {
+        return false;
+    }
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+        const msg = state.messages[i];
+        if (msg?.role !== 'assistant') {
+            continue;
+        }
+        const existing = extractThinking(msg).trim();
+        if (!existing) {
+            continue;
+        }
+        if (existing === streamingText || existing.includes(streamingText)) {
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+function prependMergedTurnThinking(
+    turnBody: HTMLElement,
+    parts: string[],
+    durationSec: number,
+    thinkKey: string,
+): void {
+    const merged = parts.map((p) => p.trim()).filter(Boolean).join('\n\n');
+    if (!merged) {
+        return;
+    }
+    turnBody
+        .querySelector(`details.thinking-block[data-think-key="${thinkKey}"]`)
+        ?.remove();
+    turnBody.insertBefore(
+        buildThinkingBlock(merged, false, durationSec > 0 ? durationSec : undefined, thinkKey),
+        turnBody.firstChild,
+    );
+}
+
+function buildThinkingBlock(
+    text: string,
+    active: boolean,
+    durationSec?: number,
+    thinkKey?: string,
+): HTMLElement {
     const details = document.createElement('details');
     details.className = `thinking-block${active ? ' active' : ''}`;
+    if (thinkKey) {
+        details.dataset.thinkKey = thinkKey;
+        if (thinkingOpenByKey.has(thinkKey)) {
+            details.open = thinkingOpenByKey.get(thinkKey)!;
+        }
+    }
+
     let label: string;
     if (active) {
-        label = 'Thinking...';
+        label = 'Thinking…';
     } else if (durationSec && durationSec > 0) {
         label = `Thought for ${durationSec} second${durationSec !== 1 ? 's' : ''}`;
     } else {
         label = 'Thought';
     }
-    details.innerHTML = `
-        <summary class="thinking-summary">
-            <span class="thinking-indicator"></span>
-            <span class="thinking-label">${label}</span>
-            <span class="thinking-chevron">&#9656;</span>
-        </summary>
-        <div class="thinking-content">${renderMarkdown(text)}</div>
+
+    const summary = document.createElement('summary');
+    summary.className = 'thinking-summary';
+    summary.innerHTML = `
+        <span class="thinking-indicator"></span>
+        <span class="thinking-label">${label}</span>
+        <span class="thinking-chevron">&#9656;</span>
     `;
+
+    const content = document.createElement('div');
+    content.className = 'thinking-content';
+    const trimmed = text.trim();
+    if (trimmed) {
+        content.innerHTML = renderMarkdown(trimmed);
+    } else {
+        const ph = document.createElement('p');
+        ph.className = 'thinking-placeholder';
+        ph.textContent = 'No reasoning text was captured for this step.';
+        content.appendChild(ph);
+    }
+
+    details.appendChild(summary);
+    details.appendChild(content);
+    details.addEventListener('toggle', () => {
+        if (thinkKey) {
+            thinkingOpenByKey.set(thinkKey, details.open);
+        }
+        if (details.id === 'streaming-thinking') {
+            streamingThinkingUserOpen = details.open;
+        }
+    });
     return details;
 }
 
@@ -2005,55 +3264,17 @@ function updateFooterModel(): void {
     }
 }
 
-// ── Session list ──
-
-function renderSessionList(sessions: any[], currentId?: string): void {
-    let panel = document.getElementById('session-panel');
-    if (!panel) {
-        panel = el('div', 'session-panel');
-        panel.id = 'session-panel';
-        const app = document.getElementById('app');
-        const modelBar = document.getElementById('model-bar');
-        if (app && modelBar?.nextSibling) {
-            app.insertBefore(panel, modelBar.nextSibling);
-        } else {
-            app?.appendChild(panel);
-        }
-    }
-
-    if (sessions.length === 0) {
-        panel.innerHTML = '<div class="session-empty">No previous sessions</div>';
+function showError(message: string): void {
+    if (!message.trim()) {
         return;
     }
+    state.connectionStatus = { phase: 'failed', message: message.trim() };
+    updateConnectionBanner();
 
-    panel.innerHTML = `
-        <div class="session-header">
-            <span>Sessions</span>
-            <button class="icon-btn" id="btn-close-sessions" title="Close">&times;</button>
-        </div>
-        <div class="session-list">
-            ${sessions.map(s => `
-                <div class="session-item ${s.id === currentId ? 'active' : ''}" data-path="${escHtml(s.path)}">
-                    <span class="session-item-name">${escHtml(s.name ?? s.id)}</span>
-                </div>
-            `).join('')}
-        </div>
-    `;
-
-    document.getElementById('btn-close-sessions')?.addEventListener('click', () => panel?.remove());
-    panel.querySelectorAll('.session-item').forEach((item) => {
-        item.addEventListener('click', () => {
-            const sessionPath = (item as HTMLElement).dataset.path;
-            if (sessionPath) {
-                vscode.postMessage({ type: 'loadSession', sessionPath });
-            }
-        });
-    });
-}
-
-function showError(message: string): void {
     const container = document.getElementById('messages');
-    if (!container) return;
+    if (!container) {
+        return;
+    }
     const errEl = el('div', 'error-message');
     errEl.textContent = message;
     container.appendChild(errEl);
@@ -2063,7 +3284,27 @@ function showError(message: string): void {
 function updateStreamingUI(): void {
     const container = document.getElementById('streaming-message');
     if (!container) return;
-    container.innerHTML = '';
+
+    updateStreamActivityBar();
+
+    const hasThinking = state.isThinking || Boolean(state.streamingThinking.trim());
+    const hasPayload = Boolean(state.streamingText) || hasThinking;
+
+    if (!state.isStreaming && !hasPayload) {
+        container.querySelector('.message.message-assistant')?.remove();
+        container.classList.remove('streaming-active');
+        clearStreamingToolArtifacts();
+        setStreamPhase('idle');
+        return;
+    }
+
+    if (!state.isStreaming) {
+        clearStreamingToolArtifacts();
+    }
+
+    if (hasPayload || state.isThinking) {
+        renderStreamingContent();
+    }
 }
 
 // ── Events ──
@@ -2105,19 +3346,49 @@ function bindStableEvents(): void {
             }
         }
 
+        if (
+            e.key === 'ArrowUp' &&
+            !e.shiftKey &&
+            !e.ctrlKey &&
+            !e.metaKey &&
+            !isSlashMenuVisible() &&
+            !isAtMenuVisible() &&
+            input.selectionStart === 0 &&
+            input.selectionEnd === 0 &&
+            input.value.length === 0
+        ) {
+            e.preventDefault();
+            loadLastUserMessageToComposer();
+            return;
+        }
+
+        if (composerEdit && e.key === 'Escape') {
+            e.preventDefault();
+            clearComposerEdit();
+            return;
+        }
+
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
+            if (composerEdit) {
+                if ((e.ctrlKey || e.metaKey) && composerEdit.entryId) {
+                    submitComposerEdit('fork');
+                } else {
+                    submitComposerEdit('new');
+                }
+                return;
+            }
             if (state.isStreaming) {
                 const text = input.value.trim();
                 if (hasSendableInput(text)) {
                     if (e.ctrlKey || e.metaKey) {
                         vscode.postMessage({ type: 'steer', text });
-                        showSteerToast(text || '(attachments)');
                     } else {
                         vscode.postMessage({ type: 'queueMessage', text });
                     }
                     input.value = '';
                     input.style.height = 'auto';
+                    updateComposerToolbar();
                 }
             } else {
                 sendMessage();
@@ -2125,7 +3396,7 @@ function bindStableEvents(): void {
         }
         if (e.key === 'Escape' && state.isStreaming) {
             e.preventDefault();
-            vscode.postMessage({ type: 'abort' });
+            requestAbort();
         }
     });
 
@@ -2133,11 +3404,36 @@ function bindStableEvents(): void {
         if (!input) return;
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 200) + 'px';
+        updateComposerToolbar();
         updateAtMenu(input);
         if (isAtMenuVisible()) {
             hideSlashMenu();
         } else {
             updateSlashMenu(input);
+        }
+    });
+
+    document.querySelector('.input-footer')?.addEventListener('click', (e) => {
+        const target = e.target as HTMLElement;
+        if (target.closest('#btn-attach')) {
+            e.preventDefault();
+            vscode.postMessage({ type: 'pickAttachments' });
+            return;
+        }
+        const sendBtn = target.closest('#btn-send') as HTMLButtonElement | null;
+        if (sendBtn && !sendBtn.disabled) {
+            e.preventDefault();
+            handleSendButtonClick();
+            return;
+        }
+        if (target.closest('#btn-steer')) {
+            e.preventDefault();
+            handleSteerButtonClick();
+            return;
+        }
+        if (target.closest('.footer-model')) {
+            e.stopPropagation();
+            toggleModelPicker();
         }
     });
 
@@ -2166,7 +3462,10 @@ function bindStableEvents(): void {
     bindFileMentionMenu();
 
     newTabBtn?.addEventListener('click', () => vscode.postMessage({ type: 'createTab' }));
-    sessionsBtn?.addEventListener('click', () => vscode.postMessage({ type: 'getSessions' }));
+    sessionsBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        requestSessionPanelToggle();
+    });
     settingsBtn?.addEventListener('click', () => vscode.postMessage({ type: 'openSettings' }));
 }
 
@@ -2272,14 +3571,25 @@ function bindChangedFileItems(): void {
 function sendMessage(): void {
     const input = document.getElementById('input') as HTMLTextAreaElement | null;
     if (!input) return;
+    if (composerEdit) {
+        submitComposerEdit('new');
+        return;
+    }
     const text = input.value.trim();
     if (!hasSendableInput(text)) return;
     const attachments = [...state.pendingAttachments];
+    const attachmentCount = attachments.length;
     input.value = '';
     input.style.height = 'auto';
+    state.pendingAttachments = [];
+    updateAttachmentsStrip();
     userHasScrolled = false;
     updateScrollButton();
+    if (text || attachmentCount > 0) {
+        appendOptimisticUserMessage(text, attachmentCount);
+    }
     vscode.postMessage({ type: 'prompt', text, attachments });
+    updateComposerToolbar();
 }
 
 function bindCopyButtons(): void {
@@ -2384,7 +3694,28 @@ function renderSlashMenu(menu: HTMLElement): void {
             const idx = parseInt((item as HTMLElement).dataset.index ?? '0', 10);
             selectSlashItem(idx);
         });
+        item.addEventListener('dblclick', (e) => {
+            e.preventDefault();
+            const idx = parseInt((item as HTMLElement).dataset.index ?? '0', 10);
+            executeSlashCommand(idx);
+        });
     });
+}
+
+/** Run a slash command immediately (same as sending it in chat). */
+function executeSlashCommand(index: number): void {
+    const entry = slashMenuItems[index];
+    if (!entry) return;
+    const input = document.getElementById('input') as HTMLTextAreaElement | null;
+    if (input) {
+        input.value = '';
+        input.style.height = 'auto';
+    }
+    hideSlashMenu();
+    userHasScrolled = false;
+    updateScrollButton();
+    appendOptimisticUserMessage(entry.invocation, 0);
+    vscode.postMessage({ type: 'prompt', text: entry.invocation });
 }
 
 function selectSlashItem(index: number): void {
@@ -2500,11 +3831,11 @@ function buildMessageFooter(msg: any, index: number): HTMLElement | null {
 function extractThinking(msg: any): string {
     if (Array.isArray(msg.content)) {
         return msg.content
-            .filter((c: any) => c.type === 'thinking')
-            .map((c: any) => c.thinking ?? c.text ?? '')
-            .join('');
+            .map((c: any) => thinkingBlockText(c))
+            .filter((t: string) => t.trim())
+            .join('\n\n');
     }
-    return msg.thinking ?? '';
+    return typeof msg.thinking === 'string' ? msg.thinking : '';
 }
 
 function extractText(msg: any): string {

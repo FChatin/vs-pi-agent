@@ -25,6 +25,13 @@ export interface PiCommandInfo {
     source?: string;
 }
 
+export interface PiExtensionLoadIssue {
+    path: string;
+    message: string;
+    category: 'native' | 'tui' | 'sdk' | 'other';
+    hint: string;
+}
+
 import type { ExtensionUiRequestPayload } from './extensionUi';
 
 export type McpScopeId = 'global' | 'project' | 'projectPi';
@@ -115,6 +122,9 @@ export interface SettingsData {
     contextUsageWarningThreshold: number;
     /** npm: sources for recommended Pi packages not yet in settings.json */
     recommendedPackagesMissing?: string[];
+    /** Live session: Pi packages/extensions that failed to load in this editor */
+    extensionLoadIssues?: PiExtensionLoadIssue[];
+    loadedExtensionCount?: number;
 }
 
 export interface ToolCallPendingInfo {
@@ -157,6 +167,20 @@ export interface PlanModeInfo {
     todos: PlanTodoItem[];
 }
 
+export interface PiExtensionChromeSnapshot {
+    statuses: Array<{ key: string; text?: string }>;
+    widgets: Array<{ key: string; lines?: string[]; placement?: 'aboveEditor' | 'belowEditor' }>;
+    title?: string;
+}
+
+/** Shown in chat when the model API is unreachable or auto-retry is in progress. */
+export interface ConnectionStatus {
+    phase: 'idle' | 'retrying' | 'failed';
+    message?: string;
+    attempt?: number;
+    maxAttempts?: number;
+}
+
 export interface SerializedAgentState {
     messages: any[];
     model?: { provider: string; id: string; name?: string };
@@ -179,8 +203,14 @@ export interface SerializedAgentState {
     thinkingStartTime?: number;
     streamingThinkingDuration?: number;
     queuedMessages?: string[];
+    /** Pending Pi RPC steering messages (delivered mid-run). */
+    steeringMessages?: string[];
+    /** Pending Pi RPC follow-up messages (delivered after run). */
+    followUpMessages?: string[];
     pendingAttachments?: PendingAttachmentPreview[];
     planMode?: PlanModeInfo;
+    piExtensionChrome?: PiExtensionChromeSnapshot;
+    connectionStatus?: ConnectionStatus;
 }
 
 export interface PendingAttachmentPreview {
@@ -217,6 +247,39 @@ export interface SessionInfo {
     name?: string;
     path: string;
     lastModified?: number;
+    created?: number;
+    cwd?: string;
+    parentSessionPath?: string;
+    messageCount?: number;
+    firstMessage?: string;
+}
+
+export type SessionListScope = 'current' | 'all';
+export type SessionListSort = 'threaded' | 'recent';
+
+export interface SessionDisplayItem {
+    session: SessionInfo;
+    depth: number;
+    prefix: string;
+    age: string;
+}
+
+export interface SessionListRowPayload {
+    sessionPath: string;
+    label: string;
+    meta: string;
+    prefix: string;
+    isCurrent: boolean;
+}
+
+export interface SessionListPayload {
+    scope: SessionListScope;
+    sort: SessionListSort;
+    workspaceCwd: string;
+    items: SessionListRowPayload[];
+    loading?: boolean;
+    progress?: { loaded: number; total: number };
+    error?: string;
 }
 
 export interface WorkspaceFileMatch {
@@ -242,8 +305,13 @@ export type ClientMessage =
     | { type: 'setModel'; provider: string; modelId: string }
     | { type: 'setThinkingLevel'; level: string }
     | { type: 'newSession' }
-    | { type: 'loadSession'; sessionPath: string }
-    | { type: 'getSessions' }
+    | { type: 'openResumePicker' }
+    | { type: 'toggleSessionPanel' }
+    | { type: 'closeSessionPanel' }
+    | { type: 'loadSessionList'; scope: SessionListScope; sort: SessionListSort; query?: string }
+    | { type: 'resumeSession'; sessionPath: string }
+    | { type: 'deleteSession'; sessionPath: string }
+    | { type: 'renameSession'; sessionPath: string; name: string }
     | { type: 'getState' }
     | { type: 'approveToolCall'; toolCallId: string }
     | { type: 'rejectToolCall'; toolCallId: string }
@@ -266,6 +334,14 @@ export type ClientMessage =
     | { type: 'setAgentMode'; mode: 'agent' | 'plan' }
     | { type: 'implementPlan' }
     | { type: 'openPlanDocument' }
+    | {
+          type: 'resendUserMessage';
+          messageIndex: number;
+          text: string;
+          mode: 'new' | 'fork';
+          entryId?: string;
+      }
+    | { type: 'regenerateAssistant'; assistantMessageIndex: number; mode: 'new' | 'fork' }
     | {
           type: 'extensionUiResponse';
           id: string;
@@ -300,7 +376,8 @@ export type SettingsClientMessage =
     | { type: 'testMcpServer'; serverName: string }
     | { type: 'testAllMcpServers' }
     | { type: 'runPiLogin' }
-    | { type: 'runPiLogout' };
+    | { type: 'runPiLogout' }
+    | { type: 'rebuildNativeModules' };
 
 // Extension -> Webview messages
 export type ServerMessage =
@@ -309,7 +386,6 @@ export type ServerMessage =
     | { type: 'agentEvent'; event: any }
     | { type: 'models'; models: ModelInfo[]; current?: ModelInfo; thinkingLevel?: string }
     | { type: 'modelChanged'; model: ModelInfo; thinkingLevel?: string }
-    | { type: 'sessions'; sessions: SessionInfo[]; currentSessionId?: string }
     | { type: 'sessionChanged'; sessionId: string }
     | { type: 'fileChange'; change: FileChangeInfo }
     | { type: 'confirmResult'; action: string; confirmed: boolean; payload?: any }
@@ -320,11 +396,16 @@ export type ServerMessage =
     | { type: 'error'; message: string }
     | { type: 'extensionUiRequest'; request: ExtensionUiRequestPayload }
     | { type: 'extensionUiDismiss'; id: string }
+    | { type: 'piExtensionChrome'; chrome: PiExtensionChromeSnapshot }
+    | { type: 'setComposerText'; text: string }
+    | { type: 'toast'; message: string; variant?: 'info' | 'error' }
     | {
           type: 'workspaceFiles';
           requestId: string;
           files: WorkspaceFileMatch[];
-      };
+      }
+    | { type: 'sessionPanel'; open: boolean }
+    | { type: 'sessionList'; data: SessionListPayload };
 
 // Extension -> Settings webview messages
 export type SettingsServerMessage =
@@ -334,4 +415,5 @@ export type SettingsServerMessage =
     | { type: 'piConfigUpdated' }
     | { type: 'success'; message: string }
     | { type: 'error'; message: string }
-    | { type: 'mcpSnapshot'; snapshot: McpSettingsSnapshot };
+    | { type: 'mcpSnapshot'; snapshot: McpSettingsSnapshot }
+    | { type: 'scrollToSection'; section: string };

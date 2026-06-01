@@ -18,9 +18,34 @@ declare function acquireVsCodeApi(): {
 
 const vscode = acquireVsCodeApi();
 
+type SettingsTabId = 'general' | 'auth' | 'packages' | 'skills' | 'mcp' | 'commands';
+
+const SETTINGS_TABS: { id: SettingsTabId; label: string }[] = [
+    { id: 'general', label: 'General' },
+    { id: 'auth', label: 'Auth & models' },
+    { id: 'packages', label: 'Packages' },
+    { id: 'skills', label: 'Skills' },
+    { id: 'mcp', label: 'MCP' },
+    { id: 'commands', label: 'Commands' },
+];
+
+/** Maps legacy section ids (from /mcp, scrollToSection) to a tab. */
+const SECTION_TO_TAB: Record<string, SettingsTabId> = {
+    connection: 'general',
+    'chat-ui': 'general',
+    auth: 'auth',
+    defaults: 'auth',
+    packages: 'packages',
+    extensions: 'packages',
+    skills: 'skills',
+    mcp: 'mcp',
+    commands: 'commands',
+};
+
 let currentSettings: SettingsData | null = null;
 let loadedSkills: SkillInfo[] = [];
 let mcpSnapshot: McpSettingsSnapshot | null = null;
+let activeTab: SettingsTabId = (vscode.getState()?.activeTab as SettingsTabId) ?? 'general';
 
 window.addEventListener('message', (event) => {
     const msg = event.data as SettingsServerMessage;
@@ -56,8 +81,75 @@ window.addEventListener('message', (event) => {
         case 'error':
             showToast(msg.message, 'error');
             break;
+        case 'scrollToSection':
+            scrollToSettingsSection(msg.section);
+            break;
     }
 });
+
+function scrollToSettingsSection(section: string): void {
+    const tab = SECTION_TO_TAB[section];
+    if (tab) {
+        switchSettingsTab(tab, false);
+    }
+    requestAnimationFrame(() => {
+        const id = `section-${section}`;
+        const el = document.getElementById(id);
+        if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            el.classList.add('section-highlight');
+            setTimeout(() => el.classList.remove('section-highlight'), 2000);
+        }
+    });
+}
+
+function switchSettingsTab(tabId: SettingsTabId, persist = true): void {
+    activeTab = tabId;
+    if (persist) {
+        vscode.setState({ ...(vscode.getState() ?? {}), activeTab: tabId });
+    }
+    document.querySelectorAll('.settings-tab-btn').forEach((btn) => {
+        const id = (btn as HTMLButtonElement).dataset.tab as SettingsTabId;
+        btn.classList.toggle('active', id === tabId);
+        btn.setAttribute('aria-selected', id === tabId ? 'true' : 'false');
+    });
+    document.querySelectorAll('.settings-tab-panel').forEach((panel) => {
+        const id = (panel as HTMLElement).dataset.tabPanel as SettingsTabId;
+        panel.classList.toggle('active', id === tabId);
+    });
+}
+
+function buildTabNav(): HTMLElement {
+    const nav = el('nav', 'settings-tabs');
+    nav.setAttribute('role', 'tablist');
+    nav.setAttribute('aria-label', 'Settings sections');
+    for (const tab of SETTINGS_TABS) {
+        const btn = el('button', 'settings-tab-btn');
+        btn.type = 'button';
+        btn.dataset.tab = tab.id;
+        btn.setAttribute('role', 'tab');
+        btn.setAttribute('aria-selected', tab.id === activeTab ? 'true' : 'false');
+        btn.textContent = tab.label;
+        if (tab.id === activeTab) {
+            btn.classList.add('active');
+        }
+        btn.addEventListener('click', () => switchSettingsTab(tab.id));
+        nav.appendChild(btn);
+    }
+    return nav;
+}
+
+function buildTabPanel(tabId: SettingsTabId, children: HTMLElement[]): HTMLElement {
+    const panel = el('div', 'settings-tab-panel');
+    panel.dataset.tabPanel = tabId;
+    if (tabId === activeTab) {
+        panel.classList.add('active');
+    }
+    for (const child of children) {
+        panel.appendChild(child);
+    }
+    return panel;
+}
 
 function render(data: SettingsData): void {
     const app = document.getElementById('settings-app')!;
@@ -68,105 +160,79 @@ function render(data: SettingsData): void {
     const header = el('div', 'settings-header');
     header.innerHTML = `<h1>vs-pi-agent Settings</h1><p class="settings-version">Extension v${escHtml(data.extensionVersion ?? '?')}</p>`;
     container.appendChild(header);
+    container.appendChild(buildTabNav());
 
-    container.appendChild(buildSection('Pi CLI sync', [
-        buildToggle('syncWithPiCli', 'Use Pi CLI configuration', data.syncWithPiCli,
-            'When enabled, everything reads and writes ~/.pi/agent — same as the pi terminal.'),
-        buildPiCliSyncInfo(data),
-    ]));
-
-    if (data.syncWithPiCli) {
-        if (data.piConfigLoadError) {
-            container.appendChild(buildPiConfigErrorBanner(data.piConfigLoadError));
-        }
-        if (data.extensionVersion && semverLt(data.extensionVersion, '0.1.6')) {
-            container.appendChild(buildOutdatedVersionBanner(data.extensionVersion));
-        }
-        container.appendChild(buildPiAgentSection(data));
-    } else if (!data.syncWithPiCli) {
-        container.appendChild(buildExtensionOnlySections(data));
-    }
-
-    container.appendChild(buildSection('Tool Execution', [
-        buildToggle('autoApproveTools', 'Auto-approve tool calls', data.autoApproveTools,
-            'When enabled, the agent executes tools without asking for confirmation.'),
-        buildTextarea('allowedTools', 'Allowed Tools', data.allowedTools.join(', '),
-            'Comma-separated tool names (e.g. read, grep, bash). Empty = all.'),
-    ]));
-
-    container.appendChild(buildSection('Session Behavior', [
-        buildToggle('autoSaveSessions', 'Auto-save sessions', data.autoSaveSessions,
-            'Automatically persist sessions after each turn.'),
-        ...(data.syncWithPiCli ? [] : [
-            buildTextInput('sessionStoragePath', 'Session Storage Path', data.sessionStoragePath,
-                'Custom path for session data. Empty = ~/.pi/agent/sessions/'),
-        ]),
-        ...(data.syncWithPiCli ? [
-            buildReadOnlyRow('Sessions', `${data.piAgentDir}/sessions/ (per workspace)`),
-        ] : []),
-        buildRange('contextUsageWarningThreshold', 'Context Usage Warning', data.contextUsageWarningThreshold, 0, 100,
-            `Warn when context usage exceeds ${data.contextUsageWarningThreshold}%.`),
-    ]));
-
-    const skillsSection = buildSection('Skills', [buildSkillsPlaceholder()]);
-    skillsSection.id = 'skills-section';
-    container.appendChild(skillsSection);
-
-    container.appendChild(buildSection('Keyboard Shortcuts', [
-        buildShortcutsInfo(),
-    ]));
+    const panels = el('div', 'settings-tab-panels');
+    panels.appendChild(buildGeneralTab(data));
+    panels.appendChild(buildAuthTab(data));
+    panels.appendChild(buildPackagesTab(data));
+    panels.appendChild(buildSkillsTab(data));
+    panels.appendChild(buildMcpTab(data));
+    panels.appendChild(buildCommandsTab(data));
+    container.appendChild(panels);
 
     app.appendChild(container);
+    switchSettingsTab(activeTab, false);
     bindEvents();
     renderSkillsSection();
 }
 
-function buildPiConfigErrorBanner(message: string): HTMLElement {
-    const row = el('div', 'setting-row pi-config-error');
-    row.innerHTML = `<p class="setting-description"><strong>Pi config partial load:</strong> ${escHtml(message)}. Package list may still work from settings.json.</p>`;
-    return row;
+function buildGeneralTab(data: SettingsData): HTMLElement {
+    const children: HTMLElement[] = [];
+    if (data.piConfigLoadError) {
+        children.push(buildPiConfigErrorBanner(data.piConfigLoadError));
+    }
+    children.push(
+        buildSection('Pi CLI (RPC backend)', [
+            buildReadOnlyRow(
+                'Mode',
+                'Runs `pi --mode rpc` — same packages, skills, MCP, and slash commands as the terminal.',
+            ),
+            buildReadOnlyRow('Agent directory', data.piAgentDir),
+            buildReadOnlyRow('Sessions', `${data.piAgentDir}/sessions/`),
+            buildPiCliSyncInfo(data),
+            buildReloadRow(),
+        ], 'connection'),
+        buildSection('Chat UI', [
+            buildToggle('autoApproveTools', 'Auto-approve tool calls (VS Code)', data.autoApproveTools,
+                'Tool policy is still owned by Pi CLI (~/.pi/agent). This only affects legacy approval UI if enabled.'),
+            buildRange('contextUsageWarningThreshold', 'Context usage warning', data.contextUsageWarningThreshold, 0, 100,
+                `Warn in the chat footer above ${data.contextUsageWarningThreshold}% context.`),
+        ], 'chat-ui'),
+        buildSection('Keyboard Shortcuts', [buildShortcutsInfo()]),
+    );
+    return buildTabPanel('general', children);
 }
 
-function buildOutdatedVersionBanner(version: string): HTMLElement {
-    const row = el('div', 'setting-row pi-config-error');
-    row.innerHTML = `<p class="setting-description"><strong>Old build (v${escHtml(version)}).</strong> Packages UI needs v0.1.6+. Reinstall from <code>npm run package</code> in the extension folder, not an older 0.1.5 VSIX.</p>`;
-    return row;
+function buildAuthTab(data: SettingsData): HTMLElement {
+    const cfg = data.piConfig ?? emptyPiConfig();
+    return buildTabPanel('auth', [
+        buildSection('Authentication', [
+            buildReadOnlyRow('Agent directory', data.piAgentDir),
+            buildAuthActionsRow(),
+            buildFileButtons(),
+            buildAuthIndicator(data.authMethod),
+            buildAuthProvidersList(cfg),
+        ], 'auth'),
+        buildSection('Defaults (~/.pi/agent/settings.json)', [
+            buildPiModelDefaults(data, cfg),
+            buildPiThinkingSelect(data.piDefaultThinkingLevel ?? 'off'),
+            buildPiModeSelect('steering', 'Steering mode', cfg.steeringMode),
+            buildPiModeSelect('followup', 'Follow-up mode', cfg.followUpMode),
+        ], 'defaults'),
+    ]);
 }
 
-function buildPiAgentSection(data: SettingsData): HTMLElement {
-    const cfg = data.piConfig ?? {
-        packages: [],
-        extensionPaths: [],
-        skillPaths: [],
-        enableSkillCommands: true,
-        steeringMode: 'one-at-a-time' as const,
-        followUpMode: 'one-at-a-time' as const,
-        authProviders: [],
-        mcpFileExists: false,
-        commands: [],
-        availableModels: [],
-    };
-    const wrap = el('div', 'pi-agent-sections');
-
-    wrap.appendChild(buildSection('Agent directory', [
-        buildReadOnlyRow('Path', data.piAgentDir),
-        buildAuthActionsRow(),
-        buildFileButtons(),
-        buildAuthIndicator(data.authMethod),
-        buildAuthProvidersList(cfg),
-    ]));
-
-    wrap.appendChild(buildSection('Defaults (~/.pi/agent/settings.json)', [
-        buildPiModelDefaults(data, cfg),
-        buildPiThinkingSelect(data.piDefaultThinkingLevel ?? 'off'),
-        buildPiModeSelect('steering', 'Steering mode', cfg.steeringMode),
-        buildPiModeSelect('followup', 'Follow-up mode', cfg.followUpMode),
-    ]));
-
+function buildPackagesTab(data: SettingsData): HTMLElement {
+    const cfg = data.piConfig ?? emptyPiConfig();
     const packagesSection: HTMLElement[] = [];
     const recBanner = buildRecommendedPackagesBanner(data.recommendedPackagesMissing);
     if (recBanner) {
         packagesSection.push(recBanner);
+    }
+    const extIssues = buildExtensionLoadIssuesBanner(data);
+    if (extIssues) {
+        packagesSection.push(extIssues);
     }
     packagesSection.push(
         buildPackageCatalogRow(),
@@ -177,27 +243,106 @@ function buildPiAgentSection(data: SettingsData): HTMLElement {
             'Same packages as pi.dev/packages (via npm). Install runs npm + updates ~/.pi/agent.',
         ),
     );
-    wrap.appendChild(buildSection('Packages (npm/git)', packagesSection));
+    return buildTabPanel('packages', [
+        buildSection('Packages (npm/git)', packagesSection, 'packages'),
+        buildSection('Extension paths', [
+            buildListEditor('extensions', cfg.extensionPaths, 'Path to extension .ts file'),
+            buildAddRow('extensions', 'Add extension path', 'Absolute or ~ path'),
+        ], 'extensions'),
+    ]);
+}
 
-    wrap.appendChild(buildSection('Extension paths', [
-        buildListEditor('extensions', cfg.extensionPaths, 'Path to extension .ts file'),
-        buildAddRow('extensions', 'Add extension path', 'Absolute or ~ path'),
-    ]));
+function buildSkillsTab(data: SettingsData): HTMLElement {
+    const cfg = data.piConfig ?? emptyPiConfig();
+    const skillsSection = buildSection('Installed skills', [buildSkillsPlaceholder()]);
+    skillsSection.id = 'skills-section';
+    return buildTabPanel('skills', [
+        buildSection('Skill paths', [
+            buildListEditor('skillpaths', cfg.skillPaths, 'Directory containing SKILL.md files'),
+            buildAddRow('skillpaths', 'Add skill directory', 'Absolute or ~ path'),
+            buildPiSkillCommandsToggle(cfg.enableSkillCommands),
+        ], 'skills'),
+        skillsSection,
+    ]);
+}
 
-    wrap.appendChild(buildSection('Skill paths', [
-        buildListEditor('skillpaths', cfg.skillPaths, 'Directory containing SKILL.md files'),
-        buildAddRow('skillpaths', 'Add skill directory', 'Absolute or ~ path'),
-        buildPiSkillCommandsToggle(cfg.enableSkillCommands),
-    ]));
+function buildMcpTab(data: SettingsData): HTMLElement {
+    const cfg = data.piConfig ?? emptyPiConfig();
+    return buildTabPanel('mcp', [buildMcpSection(data, cfg)]);
+}
 
-    wrap.appendChild(buildSection('Slash commands', [
-        buildCommandsList(cfg),
-        buildReloadRow(),
-    ]));
+function buildCommandsTab(data: SettingsData): HTMLElement {
+    const cfg = data.piConfig ?? emptyPiConfig();
+    return buildTabPanel('commands', [
+        buildSection('Slash commands', [
+            buildCommandsList(cfg),
+            buildReloadRow(),
+        ], 'commands'),
+    ]);
+}
 
-    wrap.appendChild(buildMcpSection(data, cfg));
+function emptyPiConfig(): PiAgentConfigData {
+    return {
+        packages: [],
+        extensionPaths: [],
+        skillPaths: [],
+        enableSkillCommands: true,
+        steeringMode: 'one-at-a-time',
+        followUpMode: 'one-at-a-time',
+        authProviders: [],
+        mcpFileExists: false,
+        commands: [],
+        availableModels: [],
+    };
+}
 
-    return wrap;
+function buildPiConfigErrorBanner(message: string): HTMLElement {
+    const row = el('div', 'setting-row pi-config-error');
+    row.innerHTML = `<p class="setting-description"><strong>Pi config partial load:</strong> ${escHtml(message)}. Package list may still work from settings.json.</p>`;
+    return row;
+}
+
+function buildExtensionLoadIssuesBanner(data: SettingsData): HTMLElement | null {
+    const issues = data.extensionLoadIssues ?? [];
+    if (issues.length === 0) {
+        return null;
+    }
+    const loaded = data.loadedExtensionCount ?? '?';
+    const native = issues.filter((i) => i.category === 'native').length;
+    const rows = issues
+        .slice(0, 6)
+        .map(
+            (i) =>
+                `<li><strong>${escHtml(shortPath(i.path))}</strong> <span class="ext-issue-cat">[${escHtml(i.category)}]</span><br>${escHtml(i.message)}<br><span class="ext-issue-hint">${escHtml(i.hint)}</span></li>`,
+        )
+        .join('');
+    const more =
+        issues.length > 6
+            ? `<p class="setting-description">…and ${issues.length - 6} more (Output → vs-pi-agent)</p>`
+            : '';
+    const rebuildBtn =
+        native > 0
+            ? '<button type="button" class="setting-btn" id="btn-rebuild-native">Rebuild native modules</button>'
+            : '';
+    const row = el('div', 'setting-row pi-config-error');
+    row.innerHTML = `
+        <p class="setting-description"><strong>${issues.length} Pi package(s) failed in this editor</strong> (${loaded} loaded). CLI and VS Code share ~/.pi/agent, but native addons (e.g. <code>pi-hermes-memory</code> / SQLite) must match the editor’s Node/Electron ABI.</p>
+        <ul class="ext-load-issues">${rows}</ul>
+        ${more}
+        <div class="setting-actions-row">${rebuildBtn}</div>
+    `;
+    return row;
+}
+
+function shortPath(p: string): string {
+    const parts = p.split(/[/\\]/);
+    return parts.length > 3 ? '…/' + parts.slice(-3).join('/') : p;
+}
+
+function buildOutdatedVersionBanner(version: string): HTMLElement {
+    const row = el('div', 'setting-row pi-config-error');
+    row.innerHTML = `<p class="setting-description"><strong>Old build (v${escHtml(version)}).</strong> Packages UI needs v0.1.6+. Reinstall from <code>npm run package</code> in the extension folder, not an older 0.1.5 VSIX.</p>`;
+    return row;
 }
 
 function buildMcpSection(data: SettingsData, cfg: PiAgentConfigData): HTMLElement {
@@ -210,7 +355,7 @@ function buildMcpSection(data: SettingsData, cfg: PiAgentConfigData): HTMLElemen
         const loading = el('p', 'setting-description');
         loading.textContent = 'Loading MCP configuration…';
         children.push(loading);
-        return buildSection('MCP servers', children);
+        return buildSection('MCP servers', children, 'mcp');
     }
 
     if (!snap.hasMcpAdapter) {
@@ -251,7 +396,7 @@ function buildMcpSection(data: SettingsData, cfg: PiAgentConfigData): HTMLElemen
     }
     children.push(list);
 
-    return buildSection('MCP servers', children);
+    return buildSection('MCP servers', children, 'mcp');
 }
 
 function buildMcpHelpBlock(snap: McpSettingsSnapshot | null | undefined, cfg: PiAgentConfigData): HTMLElement {
@@ -626,8 +771,11 @@ function buildReloadRow(): HTMLElement {
     return row;
 }
 
-function buildSection(title: string, children: HTMLElement[]): HTMLElement {
+function buildSection(title: string, children: HTMLElement[], sectionId?: string): HTMLElement {
     const section = el('div', 'settings-section');
+    if (sectionId) {
+        section.id = `section-${sectionId}`;
+    }
     const heading = el('h2', 'section-title');
     heading.textContent = title;
     section.appendChild(heading);
@@ -707,16 +855,10 @@ function buildRange(key: string, label: string, value: number, min: number, max:
 
 function buildPiCliSyncInfo(data: SettingsData): HTMLElement {
     const row = el('div', 'setting-row');
-    if (data.syncWithPiCli) {
-        row.innerHTML = `<p class="setting-description">
-            All changes below are written to <code>${escHtml(data.piAgentDir)}</code> — the same files the <code>pi</code> terminal uses.
-            No terminal required.
-        </p>`;
-    } else {
-        row.innerHTML = `<p class="setting-description">
-            Extension-only mode: VS Code settings and SecretStorage instead of Pi CLI files.
-        </p>`;
-    }
+    row.innerHTML = `<p class="setting-description">
+        Chat uses <code>pi --mode rpc</code>. Edit <code>${escHtml(data.piAgentDir)}</code> here or in the terminal — same files.
+        Slash commands like <code>/mcp</code> and <code>/packages</code> jump to the matching tab above.
+    </p>`;
     return row;
 }
 
@@ -808,7 +950,7 @@ function renderSkillsSection(): void {
     if (!container) return;
 
     if (loadedSkills.length === 0) {
-        container.innerHTML = `<p class="setting-description">No skills found. Add skill paths above or place SKILL.md under <code>~/.pi/agent/skills/</code>.</p>`;
+        container.innerHTML = `<p class="setting-description">No skills found. Add skill paths in the Skills tab or place SKILL.md under <code>~/.pi/agent/skills/</code>.</p>`;
         return;
     }
 
@@ -944,6 +1086,10 @@ function bindEvents(): void {
 
     document.getElementById('btn-reload-pi-session')?.addEventListener('click', () => {
         vscode.postMessage({ type: 'reloadPiSession' });
+    });
+
+    document.getElementById('btn-rebuild-native')?.addEventListener('click', () => {
+        vscode.postMessage({ type: 'rebuildNativeModules' });
     });
 
     document.getElementById('btn-pi-login')?.addEventListener('click', () => {

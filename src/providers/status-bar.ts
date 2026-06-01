@@ -1,12 +1,12 @@
 import * as vscode from 'vscode';
-import type { PiSessionManager } from '../pi/session';
+import type { PiChatSession } from '../pi/slashCommands';
 
 export class StatusBarManager implements vscode.Disposable {
     private _item: vscode.StatusBarItem;
-    private _session: PiSessionManager;
+    private _session: PiChatSession;
     private _unsubscribe: (() => void) | undefined;
 
-    constructor(session: PiSessionManager) {
+    constructor(session: PiChatSession) {
         this._session = session;
         this._item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
         this._item.command = 'pi-agent.selectModel';
@@ -18,7 +18,9 @@ export class StatusBarManager implements vscode.Disposable {
                 event.type === 'agent_start' ||
                 event.type === 'agent_end' ||
                 event.type === 'message_end' ||
-                event.type === 'turn_end'
+                event.type === 'turn_end' ||
+                event.type === 'auto_retry_start' ||
+                event.type === 'auto_retry_end'
             ) {
                 this._update();
             }
@@ -27,10 +29,20 @@ export class StatusBarManager implements vscode.Disposable {
 
     private _update(): void {
         const model = this._session.getCurrentModel();
-        const isStreaming = this._session.session?.isStreaming ?? false;
-        const icon = isStreaming ? '$(loading~spin)' : '$(hubot)';
+        const agentSession = this._session.session;
+        const isRetrying = agentSession?.isRetrying ?? false;
+        const isStreaming = (agentSession?.isStreaming ?? false) || isRetrying;
+        const icon = isRetrying
+            ? '$(sync~spin)'
+            : isStreaming
+              ? '$(loading~spin)'
+              : '$(hubot)';
         const name = model ? (model.name ?? model.id) : 'No model';
-        this._item.text = `${icon} vs-pi-agent: ${name}`;
+        const retrySuffix =
+            isRetrying && agentSession && agentSession.retryAttempt > 0
+                ? ` (reconnecting ${agentSession.retryAttempt})`
+                : '';
+        this._item.text = `${icon} vs-pi-agent: ${name}${retrySuffix}`;
 
         const usage = this._session.session?.getContextUsage?.();
         const parts: string[] = ['vs-pi-agent'];

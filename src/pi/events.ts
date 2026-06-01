@@ -1,6 +1,6 @@
-import type { AgentSessionEvent, AgentSessionEventListener } from '@earendil-works/pi-coding-agent';
+import type { PiAgentEvent } from './rpcTypes';
 
-export type EventHandler = (event: AgentSessionEvent) => void;
+export type EventHandler = (event: PiAgentEvent) => void;
 
 export class EventRouter {
     private _handlers = new Map<string, Set<EventHandler>>();
@@ -21,29 +21,33 @@ export class EventRouter {
         return () => this._globalHandlers.delete(handler);
     }
 
-    dispatch(event: AgentSessionEvent): void {
+    dispatch(event: PiAgentEvent): void {
         for (const handler of this._globalHandlers) {
             try {
                 handler(event);
-            } catch (_) { /* swallow listener errors */ }
+            } catch {
+                /* swallow listener errors */
+            }
         }
         const set = this._handlers.get(event.type);
         if (set) {
             for (const handler of set) {
                 try {
                     handler(event);
-                } catch (_) { /* swallow listener errors */ }
+                } catch {
+                    /* swallow listener errors */
+                }
             }
         }
-    }
-
-    /** Returns a listener suitable for AgentSession.subscribe() */
-    asSessionListener(): AgentSessionEventListener {
-        return (event) => this.dispatch(event);
     }
 
     clear(): void {
         this._handlers.clear();
         this._globalHandlers.clear();
+    }
+
+    /** Compatibility shim for tests that mimic AgentSession.subscribe(). */
+    asSessionListener(): (event: PiAgentEvent) => void {
+        return (event) => this.dispatch(event);
     }
 }

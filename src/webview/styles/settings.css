@@ -42,7 +42,65 @@ body {
 .settings-version {
     font-size: 11px;
     color: var(--muted);
-    margin-bottom: 20px;
+    margin-bottom: 12px;
+}
+
+/* Tab navigation */
+.settings-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--bg);
+}
+
+.settings-tab-btn {
+    padding: 5px 12px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    white-space: nowrap;
+}
+
+.settings-tab-btn:hover {
+    color: var(--fg);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.settings-tab-btn.active {
+    color: var(--fg);
+    background: var(--card-bg);
+    border-color: var(--border);
+    font-weight: 500;
+}
+
+.settings-tab-panels {
+    flex: 1;
+    min-height: 0;
+}
+
+.settings-tab-panel {
+    display: none;
+}
+
+.settings-tab-panel.active {
+    display: block;
+    animation: settings-tab-in 0.12s ease-out;
+}
+
+@keyframes settings-tab-in {
+    from { opacity: 0.6; }
+    to { opacity: 1; }
 }
 
 .pi-config-error {
@@ -56,6 +114,39 @@ body {
 .pi-config-error .setting-description {
     margin-top: 0;
     color: var(--error-fg);
+}
+
+.ext-load-issues {
+    margin: 10px 0 12px 18px;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.ext-load-issues li {
+    margin-bottom: 10px;
+}
+
+.ext-issue-cat {
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.ext-issue-hint {
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.setting-actions-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+}
+
+.settings-section.section-highlight {
+    outline: 1px solid var(--focus-border);
+    outline-offset: 4px;
+    border-radius: 6px;
 }
 
 .settings-section {

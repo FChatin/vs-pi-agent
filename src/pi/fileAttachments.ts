@@ -2,8 +2,8 @@ import { createRequire } from 'node:module';
 import { access, readFile, stat } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { savePastedFile } from './pastedAttachmentStore';
-import type { ImageContent } from '@earendil-works/pi-ai';
-import { getPiExtensionPath } from './piSdk';
+import type { ImageContent } from '../shared/piTypes';
+import { getPiExtensionPath } from './extensionPath';
 
 export interface ProcessedFileAttachment {
     displayName: string;

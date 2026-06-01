@@ -10,7 +10,13 @@ describe('Protocol types', () => {
             { type: 'setThinkingLevel', level: 'high' },
             { type: 'newSession' },
             { type: 'getModels' },
-            { type: 'getSessions' },
+            { type: 'openResumePicker' },
+            { type: 'toggleSessionPanel' },
+            { type: 'loadSessionList', scope: 'current', sort: 'threaded', query: '' },
+            { type: 'resumeSession', sessionPath: '/tmp/s.jsonl' },
+            { type: 'deleteSession', sessionPath: '/tmp/s.jsonl' },
+            { type: 'renameSession', sessionPath: '/tmp/s.jsonl', name: 'My session' },
+            { type: 'closeSessionPanel' },
             { type: 'getState' },
         ];
 

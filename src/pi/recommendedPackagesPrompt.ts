@@ -1,9 +1,8 @@
 import * as vscode from 'vscode';
-import type { PiSessionManager } from './session';
+import type { PiChatSession } from './slashCommands';
 import { isSyncWithPiCli } from './piCliSync';
-import { getPiAgentDir } from './piCliSync';
 import { installPiPackage } from './piPackageInstall';
-import { loadPiCodingAgent } from './piSdk';
+import { getPiPackagesFromSettings } from './piSettingsJson';
 import {
     formatMissingPackagesList,
     getMissingRecommendedPackages,
@@ -13,7 +12,7 @@ import {
 
 async function installRecommendedPackages(
     packages: readonly RecommendedPiPackage[],
-    sessionManager: PiSessionManager | undefined,
+    sessionManager: PiChatSession | undefined,
     outputChannel: vscode.OutputChannel,
     onProgress?: (message: string) => void,
 ): Promise<string[]> {
@@ -26,25 +25,24 @@ async function installRecommendedPackages(
     return installed;
 }
 
-async function readConfiguredPackageSources(): Promise<string[]> {
-    const { SettingsManager } = await loadPiCodingAgent();
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-    const agentDir = await getPiAgentDir();
-    const sm = SettingsManager.create(cwd, agentDir);
-    return sm.getPackages().map((p) => (typeof p === 'string' ? p : p.source));
+async function readSlashCommandNames(sessionManager?: PiChatSession): Promise<string[]> {
+    if (!sessionManager) {
+        return [];
+    }
+    const cmds = await sessionManager.listSlashCommands();
+    return cmds.map((c) => c.name.replace(/^skill:/, ''));
 }
 
-const GLOBAL_DISMISS_KEY = 'piAgent.recommendedPackagesDismissed';
-
 export async function runRecommendedPackagesSetup(
-    sessionManager: PiSessionManager | undefined,
+    sessionManager: PiChatSession | undefined,
     outputChannel: vscode.OutputChannel,
     packagesToInstall?: readonly RecommendedPiPackage[],
 ): Promise<void> {
-    const configured = await readConfiguredPackageSources();
+    const configured = getPiPackagesFromSettings();
+    const slash = await readSlashCommandNames(sessionManager);
     const missing =
         packagesToInstall ??
-        getMissingRecommendedPackages(configured, sessionManager?.session);
+        getMissingRecommendedPackages(configured, slash);
 
     if (missing.length === 0) {
         vscode.window.showInformationMessage('All recommended Pi packages are already configured.');
@@ -76,12 +74,9 @@ export async function runRecommendedPackagesSetup(
     );
 }
 
-/**
- * On activation: warn or install recommended ~/.pi/agent packages when missing.
- */
 export async function maybePromptForRecommendedPackages(
     context: vscode.ExtensionContext,
-    sessionManager: PiSessionManager,
+    sessionManager: PiChatSession,
     outputChannel: vscode.OutputChannel,
 ): Promise<void> {
     if (!isSyncWithPiCli()) {
@@ -93,12 +88,13 @@ export async function maybePromptForRecommendedPackages(
         return;
     }
 
-    if (context.globalState.get<boolean>(GLOBAL_DISMISS_KEY, false)) {
+    if (context.globalState.get<boolean>('piAgent.recommendedPackagesDismissed', false)) {
         return;
     }
 
-    const configured = await readConfiguredPackageSources();
-    const missing = getMissingRecommendedPackages(configured, sessionManager.session);
+    const configured = getPiPackagesFromSettings();
+    const slash = await readSlashCommandNames(sessionManager);
+    const missing = getMissingRecommendedPackages(configured, slash);
     if (missing.length === 0) {
         return;
     }
@@ -143,7 +139,7 @@ export async function maybePromptForRecommendedPackages(
             await vscode.commands.executeCommand('pi-agent.openSettings');
             break;
         case "Don't ask again":
-            await context.globalState.update(GLOBAL_DISMISS_KEY, true);
+            await context.globalState.update('piAgent.recommendedPackagesDismissed', true);
             break;
         default:
             break;

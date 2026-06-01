@@ -2,6 +2,8 @@ import type { ExtensionUiRequestPayload } from '../shared/extensionUi';
 import { vscode } from './vscodeApi';
 
 let activeRequest: ExtensionUiRequestPayload | null = null;
+const pendingQueue: ExtensionUiRequestPayload[] = [];
+let keyHandler: ((e: KeyboardEvent) => void) | null = null;
 
 export function initExtensionUiHost(): void {
     const host = document.getElementById('extension-ui-host');
@@ -46,31 +48,83 @@ export function initExtensionUiHost(): void {
 }
 
 export function showExtensionUiRequest(request: ExtensionUiRequestPayload): void {
-    activeRequest = request;
-    const host = document.getElementById('extension-ui-host');
-    if (!host) {
-        return;
-    }
-    host.style.display = 'block';
-    host.innerHTML = renderRequest(request);
-    host.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    pendingQueue.push(request);
+    drainExtensionUiQueue();
 }
 
 export function dismissExtensionUi(id: string): void {
-    if (activeRequest?.id !== id) {
+    if (activeRequest?.id === id) {
+        finishActiveRequest();
         return;
     }
+    const idx = pendingQueue.findIndex((r) => r.id === id);
+    if (idx !== -1) {
+        pendingQueue.splice(idx, 1);
+    }
+}
+
+function drainExtensionUiQueue(): void {
+    if (activeRequest || pendingQueue.length === 0) {
+        return;
+    }
+    activeRequest = pendingQueue.shift()!;
+    const host = document.getElementById('extension-ui-host');
+    if (!host) {
+        activeRequest = null;
+        return;
+    }
+    host.style.display = 'block';
+    host.innerHTML = renderRequest(activeRequest);
+    bindExtensionUiKeyboard(activeRequest);
+    const firstOption = host.querySelector('.extension-ui-option') as HTMLButtonElement | null;
+    firstOption?.focus();
+    host.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+function finishActiveRequest(): void {
+    unbindExtensionUiKeyboard();
     activeRequest = null;
     const host = document.getElementById('extension-ui-host');
     if (host) {
         host.style.display = 'none';
         host.innerHTML = '';
     }
+    drainExtensionUiQueue();
 }
 
 function respond(payload: { id: string; cancelled?: boolean; value?: string; confirmed?: boolean }): void {
     vscode.postMessage({ type: 'extensionUiResponse', ...payload });
     dismissExtensionUi(payload.id);
+}
+
+function bindExtensionUiKeyboard(req: ExtensionUiRequestPayload): void {
+    unbindExtensionUiKeyboard();
+    keyHandler = (e: KeyboardEvent) => {
+        if (!activeRequest || activeRequest.id !== req.id) {
+            return;
+        }
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            respond({ id: req.id, cancelled: true });
+            return;
+        }
+        if (req.method !== 'select' || !req.options?.length) {
+            return;
+        }
+        const num = parseInt(e.key, 10);
+        if (num >= 1 && num <= 9 && num <= req.options.length) {
+            e.preventDefault();
+            respond({ id: req.id, value: req.options[num - 1] });
+        }
+    };
+    document.addEventListener('keydown', keyHandler, true);
+}
+
+function unbindExtensionUiKeyboard(): void {
+    if (keyHandler) {
+        document.removeEventListener('keydown', keyHandler, true);
+        keyHandler = null;
+    }
 }
 
 function escHtml(s: string): string {
@@ -81,11 +135,27 @@ function escHtml(s: string): string {
         .replace(/"/g, '&quot;');
 }
 
+function escAttr(s: string): string {
+    return escHtml(s).replace(/'/g, '&#39;');
+}
+
 function optionLetter(index: number): string {
     if (index < 26) {
         return String.fromCharCode(65 + index);
     }
     return String(index + 1);
+}
+
+/** Split "1. Label — description" (plan_mode_question) into title + subtitle. */
+function parseOptionDisplay(opt: string): { title: string; description?: string; value: string } {
+    const value = opt;
+    const numbered = opt.match(/^\s*(\d+)[.)]\s+(.+)$/);
+    const body = numbered ? numbered[2].trim() : opt.trim();
+    const dash = body.match(/^(.+?)\s+[—–-]\s+(.+)$/);
+    if (dash) {
+        return { title: dash[1].trim(), description: dash[2].trim(), value };
+    }
+    return { title: body || opt, value };
 }
 
 function renderRequest(req: ExtensionUiRequestPayload): string {
@@ -125,7 +195,7 @@ function renderRequest(req: ExtensionUiRequestPayload): string {
                 <div class="extension-ui-header">
                     <span class="extension-ui-badge">${badge}</span>
                     <div class="extension-ui-title">${escHtml(title)}</div>
-                    <p class="extension-ui-subtitle">Submit to reply; leave empty and use Cancel to dismiss.</p>
+                    <p class="extension-ui-subtitle">Submit to reply · Esc to cancel</p>
                 </div>
                 <textarea id="extension-ui-input" class="extension-ui-textarea" rows="${rows}" placeholder="${escHtml(placeholder)}">${escHtml(prefill)}</textarea>
                 <div class="extension-ui-actions-row">
@@ -139,21 +209,29 @@ function renderRequest(req: ExtensionUiRequestPayload): string {
     const optionButtons = options
         .map((opt, i) => {
             const letter = optionLetter(i);
-            const label = opt.replace(/^\d+\.\s*/, '').trim() || opt;
+            const { title: optTitle, description, value } = parseOptionDisplay(opt);
+            const descHtml = description
+                ? `<span class="extension-ui-option-desc">${escHtml(description)}</span>`
+                : '';
             return `
-                <button type="button" class="extension-ui-option" data-extension-ui-option="${escHtml(opt)}">
+                <button type="button" class="extension-ui-option" data-extension-ui-option="${escAttr(value)}">
                     <span class="extension-ui-letter">${letter}</span>
-                    <span class="extension-ui-option-text">${escHtml(label)}</span>
+                    <span class="extension-ui-option-text">${escHtml(optTitle)}${descHtml}</span>
                 </button>`;
         })
         .join('');
+
+    const keyHint =
+        options.length > 0 && options.length <= 9
+            ? `Press 1–${options.length} or click · Esc to cancel`
+            : 'Click an option · Esc to cancel';
 
     return `
         <div class="extension-ui-card" role="dialog" aria-label="${escHtml(title)}">
             <div class="extension-ui-header">
                 <span class="extension-ui-badge">${badge}</span>
                 <div class="extension-ui-title">${escHtml(title)}</div>
-                <p class="extension-ui-subtitle">Click an option — no need to type A/B/C in chat.</p>
+                <p class="extension-ui-subtitle">${escHtml(keyHint)}</p>
             </div>
             <div class="extension-ui-options">${optionButtons}</div>
             <div class="extension-ui-actions-row">

@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as vscode from 'vscode';
-import { getPiAgentDir } from './piCliSync';
+import { getPiAgentDir } from './piCliPaths';
 
 const execFileAsync = promisify(execFile);
 
@@ -138,7 +138,7 @@ function normalizeRaw(filePath: string): McpConfigFile {
 }
 
 async function globalConfigPath(): Promise<string> {
-    const agentDir = await getPiAgentDir();
+    const agentDir = getPiAgentDir();
     return path.join(agentDir, 'mcp.json');
 }
 
@@ -283,7 +283,7 @@ export async function loadMcpSettingsSnapshot(
     probeResults?: Map<string, { ok: boolean; message: string }>,
 ): Promise<McpSettingsSnapshot> {
     const cwd = workspaceRoot();
-    const agentDir = await getPiAgentDir();
+    const agentDir = getPiAgentDir();
     const globalPath = await globalConfigPath();
     const paths: McpConfigPathInfo[] = [
         { id: 'global', label: 'Global (~/.pi/agent/mcp.json)', path: globalPath, exists: fs.existsSync(globalPath) },

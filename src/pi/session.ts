@@ -1,5 +1,11 @@
 import * as vscode from 'vscode';
-import type { AgentSession, AgentSessionEvent, SessionManager, ModelRegistry } from '@earendil-works/pi-coding-agent';
+import type {
+    AgentSession,
+    AgentSessionEvent,
+    LoadExtensionsResult,
+    SessionManager,
+    ModelRegistry,
+} from '@earendil-works/pi-coding-agent';
 import type { ImageContent } from '@earendil-works/pi-ai';
 import type {
     SerializedAgentState,
@@ -18,6 +24,7 @@ import {
     isSyncWithPiCli,
     listConfiguredProviders,
 } from './piCliSync';
+import { buildExtensionLoadIssues, type ExtensionLoadIssue } from './piExtensionCompat';
 import { logExtensionLoadResult } from './piExtensionDiagnostics';
 import { tryHandleBashPrefix, tryHandleBuiltinSlashCommand } from './slashCommands';
 import { getPiExtensionPath, getPiSdkEntryPath, loadPiCodingAgent } from './piSdk';
@@ -38,6 +45,7 @@ export class PiSessionManager {
     private _outputChannel: vscode.OutputChannel;
     private _toolApprovalHandler: ToolApprovalHandler | undefined;
     private _extensionUiBridge: ExtensionUiBridge | undefined;
+    private _extensionsResult: LoadExtensionsResult | undefined;
     readonly events = new EventRouter();
 
     constructor(outputChannel: vscode.OutputChannel) {
@@ -50,6 +58,22 @@ export class PiSessionManager {
 
     get isReady(): boolean {
         return this._session !== undefined;
+    }
+
+    getExtensionLoadIssues(): ExtensionLoadIssue[] {
+        return buildExtensionLoadIssues(this._extensionsResult);
+    }
+
+    getLoadedExtensionCount(): number {
+        return this._extensionsResult?.extensions?.length ?? 0;
+    }
+
+    private _recordExtensionsResult(
+        result: LoadExtensionsResult | undefined,
+        notify: boolean,
+    ): void {
+        this._extensionsResult = result;
+        logExtensionLoadResult(this._outputChannel, result, { notify });
     }
 
     async initialize(): Promise<void> {
@@ -65,7 +89,7 @@ export class PiSessionManager {
         this._sessionManager = opts.sessionManager;
 
         const { session, modelFallbackMessage, extensionsResult } = await createAgentSession(opts);
-        logExtensionLoadResult(this._outputChannel, extensionsResult);
+        this._recordExtensionsResult(extensionsResult, true);
 
         this._session = session;
         this._unsubscribe = session.subscribe(this.events.asSessionListener());
@@ -228,6 +252,10 @@ export class PiSessionManager {
         }
         try {
             await this._session.reload();
+            const loader = this._session.resourceLoader;
+            if (loader?.getExtensions) {
+                this._recordExtensionsResult(loader.getExtensions(), true);
+            }
             await applyPiCliDefaultModel(this._session);
             this._installToolApprovalHook(this._session);
             this._attachExtensionUi();
@@ -275,7 +303,7 @@ export class PiSessionManager {
         this._sessionManager = opts.sessionManager;
 
         const { session, extensionsResult } = await createAgentSession(opts);
-        logExtensionLoadResult(this._outputChannel, extensionsResult);
+        this._recordExtensionsResult(extensionsResult, false);
 
         this._session = session;
         this._unsubscribe = session.subscribe(this.events.asSessionListener());
@@ -313,7 +341,7 @@ export class PiSessionManager {
         });
 
         const { session, extensionsResult } = await createAgentSession(opts);
-        logExtensionLoadResult(this._outputChannel, extensionsResult);
+        this._recordExtensionsResult(extensionsResult, false);
 
         this._session = session;
         this._unsubscribe = session.subscribe(this.events.asSessionListener());

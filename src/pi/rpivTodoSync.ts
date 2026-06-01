@@ -1,4 +1,3 @@
-import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import type { PlanTodoItem } from '../shared/protocol';
 
 const TODO_TOOL_NAME = 'todo';
@@ -24,43 +23,19 @@ function isTaskDetails(value: unknown): value is TaskDetailsShape {
     return Array.isArray(v.tasks) && typeof v.nextId === 'number';
 }
 
-/** Latest `todo` tool snapshot from session branch or live messages (rpiv-todo). */
-export function extractRpivTodoTasks(session: AgentSession | undefined): RpivTask[] {
-    if (!session) {
+/** Latest `todo` tool snapshot from messages (rpiv-todo). */
+export function extractRpivTodoTasks(session: { messages?: unknown[] } | undefined): RpivTask[] {
+    if (!session?.messages?.length) {
         return [];
     }
 
     let latest: TaskDetailsShape | undefined;
-
-    try {
-        for (const entry of session.sessionManager.getBranch()) {
-            const e = entry as {
-                type?: string;
-                message?: { role?: string; toolName?: string; details?: unknown };
-            };
-            if (e.type !== 'message') {
-                continue;
-            }
-            const msg = e.message;
-            if (msg?.role !== 'toolResult' || msg.toolName !== TODO_TOOL_NAME) {
-                continue;
-            }
-            if (isTaskDetails(msg.details)) {
-                latest = msg.details;
-            }
+    for (const msg of session.messages as any[]) {
+        if (msg?.role !== 'toolResult' || msg.toolName !== TODO_TOOL_NAME) {
+            continue;
         }
-    } catch {
-        // ignore
-    }
-
-    if (!latest) {
-        for (const msg of session.messages ?? []) {
-            if (msg?.role !== 'toolResult' || msg.toolName !== TODO_TOOL_NAME) {
-                continue;
-            }
-            if (isTaskDetails(msg.details)) {
-                latest = msg.details;
-            }
+        if (isTaskDetails(msg.details)) {
+            latest = msg.details;
         }
     }
 

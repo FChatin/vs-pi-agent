@@ -1,54 +1,69 @@
-import type { AgentSession } from '@earendil-works/pi-coding-agent';
-import type { PlanModeInfo, PlanTodoItem } from '../shared/protocol';
+import type { PlanModeInfo, PlanTodoItem, PiExtensionChromeSnapshot } from '../shared/protocol';
+import type { SessionJsonlEntry } from './sessionJsonl';
 
 const PLAN_STATE_ENTRY = 'plan-mode-state';
-/** Built-in pi-coding-agent example extension uses this type. */
 const PLAN_STATE_ENTRY_LEGACY = 'plan-mode';
 const PROPOSED_PLAN_MESSAGE = 'proposed-plan';
 const PROPOSED_PLAN_PATTERN = /<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/i;
+
 interface RawPlanModeState {
     enabled?: boolean;
     latestPlan?: string;
     awaitingAction?: boolean;
 }
 
-/** Latest persisted plan-mode snapshot (matches @narumitw/pi-plan-mode restoreState). */
-function readLatestPlanStateEntry(session: AgentSession): RawPlanModeState | undefined {
+export interface PlanModeContext {
+    messages?: unknown[];
+    jsonlEntries?: SessionJsonlEntry[];
+    activeToolNames?: string[];
+}
+
+function readLatestPlanStateFromJsonl(entries: SessionJsonlEntry[]): RawPlanModeState | undefined {
     let last: RawPlanModeState | undefined;
-    try {
-        for (const entry of session.sessionManager.getEntries()) {
-            if (entry.type !== 'custom' || !entry.data) {
-                continue;
-            }
-            if (entry.customType === PLAN_STATE_ENTRY) {
-                last = entry.data as RawPlanModeState;
-            } else if (entry.customType === PLAN_STATE_ENTRY_LEGACY) {
-                const legacy = entry.data as { enabled?: boolean; todos?: unknown[]; executing?: boolean };
-                last = {
-                    enabled: legacy.enabled === true,
-                    awaitingAction: false,
-                    latestPlan: undefined,
-                };
-            }
+    for (const entry of entries) {
+        if (entry.type !== 'custom') {
+            continue;
         }
-    } catch {
-        // ignore
+        if (entry.customType === PLAN_STATE_ENTRY) {
+            last = entry.data as RawPlanModeState;
+        } else if (entry.customType === PLAN_STATE_ENTRY_LEGACY) {
+            const legacy = entry.data as { enabled?: boolean };
+            last = { enabled: legacy.enabled === true, awaitingAction: false };
+        }
     }
     return last;
 }
 
-export function readPlanModeInfo(session: AgentSession | undefined): PlanModeInfo {
-    if (!session) {
-        return emptyPlanMode();
+function readLatestPlanStateFromBranch(
+    branch: Array<{ type?: string; customType?: string; content?: unknown }>,
+): RawPlanModeState | undefined {
+    let last: RawPlanModeState | undefined;
+    for (const entry of branch) {
+        if (entry.type !== 'custom' || entry.customType !== PLAN_STATE_ENTRY) {
+            continue;
+        }
+        last = entry.data as RawPlanModeState;
     }
+    return last;
+}
 
-    const persisted = readLatestPlanStateEntry(session);
+/** Plan mode snapshot for RPC sessions (jsonl + live messages). */
+export function readPlanModeInfoFromContext(ctx: PlanModeContext): PlanModeInfo {
+    const jsonlEntries = ctx.jsonlEntries ?? [];
+    const messages = (ctx.messages ?? []) as any[];
+
+    const persisted =
+        readLatestPlanStateFromJsonl(jsonlEntries) ??
+        readLatestPlanStateFromBranch(
+            jsonlEntries as Array<{ type?: string; customType?: string; content?: unknown }>,
+        ) ??
+        readLatestPlanStateFromSessionManager(ctx);
+
     let raw: RawPlanModeState = persisted ?? { enabled: false, awaitingAction: false };
 
-    const fromMessages = extractPlanFromMessages(session.messages ?? []);
-    const fromBranch = extractPlanFromBranch(session);
+    const fromMessages = extractPlanFromMessages(messages);
+    const fromBranch = extractPlanFromBranch(jsonlEntries);
     const planMarkdown = (raw.latestPlan?.trim() || fromBranch || fromMessages || '').trim();
-    // Trust persisted plan-mode-state only — do not infer from tools (stale plan_mode_question after /plan exit).
     const enabled = raw.enabled === true;
     const awaitingAction = raw.awaitingAction === true;
     const hasPlan = planMarkdown.length > 0;
@@ -70,31 +85,40 @@ export function readPlanModeInfo(session: AgentSession | undefined): PlanModeInf
     };
 }
 
-function emptyPlanMode(): PlanModeInfo {
-    return {
-        enabled: false,
-        hasPlan: false,
-        awaitingAction: false,
-        statusLabel: 'off',
-        planMarkdown: '',
-        todos: [],
-    };
-}
-
-function extractPlanFromBranch(session: AgentSession): string {
-    let last = '';
+function readLatestPlanStateFromSessionManager(ctx: PlanModeContext): RawPlanModeState | undefined {
+    const sm = (ctx as { sessionManager?: { getEntries?: () => unknown[] } }).sessionManager;
+    if (!sm?.getEntries) {
+        return undefined;
+    }
+    let last: RawPlanModeState | undefined;
     try {
-        for (const entry of session.sessionManager.getBranch()) {
-            if (entry.type !== 'custom_message' || entry.customType !== PROPOSED_PLAN_MESSAGE) {
+        for (const entry of sm.getEntries() as Array<{ type: string; customType?: string; data?: unknown }>) {
+            if (entry.type !== 'custom' || !entry.data) {
                 continue;
             }
-            const content = (entry as { content?: unknown }).content;
-            if (typeof content === 'string') {
-                last = stripProposedPlanDisplay(content);
+            if (entry.customType === PLAN_STATE_ENTRY) {
+                last = entry.data as RawPlanModeState;
+            } else if (entry.customType === PLAN_STATE_ENTRY_LEGACY) {
+                const legacy = entry.data as { enabled?: boolean };
+                last = { enabled: legacy.enabled === true, awaitingAction: false };
             }
         }
     } catch {
-        // ignore
+        return undefined;
+    }
+    return last;
+}
+
+function extractPlanFromBranch(entries: SessionJsonlEntry[]): string {
+    let last = '';
+    for (const entry of entries) {
+        if (entry.type !== 'custom_message' || entry.customType !== PROPOSED_PLAN_MESSAGE) {
+            continue;
+        }
+        const content = entry.content;
+        if (typeof content === 'string') {
+            last = stripProposedPlanDisplay(content);
+        }
     }
     return last;
 }
@@ -176,4 +200,70 @@ export function buildImplementPlanPrompt(planMarkdown: string): string {
         'Plan mode is now disabled. Full tool access is restored. ' +
         `Implement this proposed plan now:\n\n${planMarkdown}`
     );
+}
+
+function stripAnsi(text: string): string {
+    return text.replace(/\u001b\[[0-9;]*m/g, '');
+}
+
+/** Merge live plan-mode widget/status from Pi RPC extension chrome into session plan snapshot. */
+export function enrichPlanModeFromExtensionChrome(
+    planMode: PlanModeInfo,
+    chrome?: PiExtensionChromeSnapshot,
+): PlanModeInfo {
+    if (!chrome) {
+        return planMode;
+    }
+
+    const planWidget = chrome.widgets.find((w) => w.key === 'plan-mode-plan');
+    const widgetLines = planWidget?.lines?.map((l) => stripAnsi(l)).filter((l) => l.trim()) ?? [];
+    const widgetMarkdown = widgetLines.join('\n').trim();
+
+    const statusRaw = chrome.statuses.find((s) => s.key === 'plan-mode')?.text ?? '';
+    const status = stripAnsi(statusRaw).toLowerCase();
+
+    let enabled = planMode.enabled;
+    let statusLabel = planMode.statusLabel;
+    let awaitingAction = planMode.awaitingAction;
+
+    if (status.includes('plan') && !status.includes('off') && !status.includes('disabled')) {
+        enabled = true;
+    }
+    if (status.includes('ready') || status.includes('awaiting') || status.includes('review')) {
+        statusLabel = 'ready';
+        awaitingAction = true;
+    } else if (enabled && !planMode.hasPlan && !widgetMarkdown) {
+        statusLabel = 'planning';
+    }
+
+    const planMarkdown = planMode.planMarkdown.trim() || widgetMarkdown;
+    const hasPlan = planMarkdown.length > 0;
+
+    if (enabled && hasPlan && (awaitingAction || planMode.awaitingAction)) {
+        statusLabel = 'ready';
+    }
+
+    return {
+        ...planMode,
+        enabled,
+        hasPlan,
+        awaitingAction,
+        statusLabel,
+        planMarkdown,
+        todos: planMode.todos.length > 0 ? planMode.todos : parsePlanTodos(planMarkdown),
+    };
+}
+
+/** @deprecated Use readPlanModeInfoFromContext — kept for unit tests with mock session. */
+export function readPlanModeInfo(session: {
+    messages?: unknown[];
+    sessionManager?: {
+        getEntries?: () => Array<{ type: string; customType?: string; data?: unknown }>;
+        getBranch?: () => Array<{ type?: string; customType?: string; content?: unknown }>;
+    };
+}): PlanModeInfo {
+    return readPlanModeInfoFromContext({
+        messages: session.messages,
+        jsonlEntries: session.sessionManager?.getBranch?.() as SessionJsonlEntry[] | undefined,
+    });
 }

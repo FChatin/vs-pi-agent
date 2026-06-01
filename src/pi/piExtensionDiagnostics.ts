@@ -1,27 +1,31 @@
 import type { LoadExtensionsResult } from '@earendil-works/pi-coding-agent';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
+import { formatExtensionLoadSummary, notifyExtensionLoadIssues } from './piExtensionCompat';
 import { getPiSdkEntryPath, loadPiCodingAgent } from './piSdk';
 
 export function logExtensionLoadResult(
     outputChannel: vscode.OutputChannel,
     result: LoadExtensionsResult | undefined,
+    options?: { notify?: boolean },
 ): void {
     if (!result) {
         return;
     }
 
-    const errors = result.errors ?? [];
-    if (errors.length > 0) {
-        outputChannel.appendLine(`Pi package/extension load errors (${errors.length}):`);
-        for (const err of errors) {
-            const msg = err.error instanceof Error ? err.error.message : String(err.error);
-            outputChannel.appendLine(`  - ${err.path}: ${msg}`);
+    const { loaded, issues } = formatExtensionLoadSummary(result);
+    if (issues.length > 0) {
+        outputChannel.appendLine(`Pi package/extension load errors (${issues.length}):`);
+        for (const issue of issues) {
+            outputChannel.appendLine(`  - [${issue.category}] ${issue.path}: ${issue.message}`);
+            outputChannel.appendLine(`    Hint: ${issue.hint}`);
         }
     }
 
-    const loaded = result.extensions?.length ?? 0;
     outputChannel.appendLine(`Pi extensions loaded: ${loaded}`);
+    if (options?.notify && issues.length > 0) {
+        void notifyExtensionLoadIssues(result, outputChannel);
+    }
 }
 
 export async function verifyPiSdkResolvable(

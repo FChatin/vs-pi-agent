@@ -2,12 +2,16 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import type { ModelInfo, PiAgentConfigData } from '../shared/protocol';
-import type { PiSessionManager } from './session';
-import { getPiAgentDir } from './piCliSync';
-import { getAvailableModels, getModelRegistry } from './models';
+import type { PiChatSession } from './slashCommands';
+import { getPiAgentDir } from './piCliPaths';
 import { normalizePiPackageSource } from './piPackageCatalog';
 import { installPiPackage, removePiPackageBySource } from './piPackageInstall';
-import { loadPiCodingAgent } from './piSdk';
+import {
+    getPiPackagesFromSettings,
+    readPiSettingsJson,
+    writePiSettingsJson,
+    type PiSettingsJson,
+} from './piSettingsJson';
 
 export interface PiAuthProviderInfo {
     id: string;
@@ -47,10 +51,13 @@ export function packageSourceToString(source: string | { source: string }): stri
 }
 
 async function createSettingsManager() {
-    const { SettingsManager } = await loadPiCodingAgent();
+    const agentDir = getPiAgentDir();
     const cwd = getCwd();
-    const agentDir = await getPiAgentDir();
-    return { sm: SettingsManager.create(cwd, agentDir), cwd, agentDir };
+    return { agentDir, cwd, settings: readPiSettingsJson() };
+}
+
+async function persistSettings(settings: PiSettingsJson): Promise<void> {
+    writePiSettingsJson(() => settings);
 }
 
 export function emptyPiAgentConfig(): PiAgentConfigData {
@@ -121,13 +128,13 @@ function readSettingsJsonFallback(agentDir: string): PiAgentConfigData {
 
 /** Load config for settings panel; never throws — returns partial data + error message on failure. */
 export async function loadPiAgentConfigForSettings(
-    sessionManager?: PiSessionManager,
+    sessionManager?: PiChatSession,
 ): Promise<{ config: PiAgentConfigData; error?: string }> {
     try {
         const snap = await loadPiAgentConfigSnapshot(sessionManager);
         return { config: snapshotToConfigData(snap) };
     } catch (err: any) {
-        const agentDir = await getPiAgentDir();
+        const agentDir = getPiAgentDir();
         return {
             config: readSettingsJsonFallback(agentDir),
             error: err?.message ?? String(err),
@@ -136,34 +143,31 @@ export async function loadPiAgentConfigForSettings(
 }
 
 export async function loadPiAgentConfigSnapshot(
-    sessionManager?: PiSessionManager,
+    sessionManager?: PiChatSession,
 ): Promise<PiAgentConfigSnapshot> {
-    const { sm, agentDir } = await createSettingsManager();
-    const packages = sm.getPackages().map(packageSourceToString);
-    const extensionPaths = sm.getExtensionPaths();
-    const skillPaths = sm.getSkillPaths();
+    const { settings, agentDir } = await createSettingsManager();
+    const packages = getPiPackagesFromSettings();
+    const extensionPaths = settings.extensions ?? [];
+    const skillPaths = settings.skills ?? [];
 
     let availableModels: ModelInfo[] = [];
-    try {
-        const registry = sessionManager?.session?.modelRegistry ?? await getModelRegistry();
-        availableModels = getAvailableModels(registry);
-    } catch {
-        availableModels = [];
+    if (sessionManager) {
+        availableModels = sessionManager.getModels();
     }
 
     const commands = await listPiCommands(sessionManager);
 
     return {
         agentDir,
-        defaultProvider: sm.getDefaultProvider(),
-        defaultModel: sm.getDefaultModel(),
-        defaultThinkingLevel: sm.getDefaultThinkingLevel(),
+        defaultProvider: settings.defaultProvider,
+        defaultModel: settings.defaultModel,
+        defaultThinkingLevel: settings.defaultThinkingLevel,
         packages,
         extensionPaths,
         skillPaths,
-        enableSkillCommands: sm.getEnableSkillCommands(),
-        steeringMode: sm.getSteeringMode(),
-        followUpMode: sm.getFollowUpMode(),
+        enableSkillCommands: settings.enableSkillCommands ?? true,
+        steeringMode: settings.steeringMode === 'all' ? 'all' : 'one-at-a-time',
+        followUpMode: settings.followUpMode === 'all' ? 'all' : 'one-at-a-time',
         authProviders: readAuthProviders(agentDir),
         mcpFileExists: fs.existsSync(path.join(agentDir, 'mcp.json')),
         commands,
@@ -187,66 +191,55 @@ function readAuthProviders(agentDir: string): PiAuthProviderInfo[] {
     }
 }
 
-async function listPiCommands(sessionManager?: PiSessionManager): Promise<PiCommandInfo[]> {
-    const runner = sessionManager?.session?.extensionRunner;
-    if (!runner) {
-        // Avoid discoverAndLoadExtensions on every settings refresh (slow; can time out).
-        return [];
+async function listPiCommands(sessionManager?: PiChatSession): Promise<PiCommandInfo[]> {
+    if (sessionManager) {
+        const cmds = await sessionManager.listSlashCommands();
+        return cmds.map((c) => ({
+            name: c.name,
+            invocationName: c.name,
+            description: c.description,
+            source: c.source,
+        }));
     }
-    return runner.getRegisteredCommands().map((c) => ({
-        name: c.name,
-        invocationName: c.invocationName,
-        description: c.description,
-        source: c.sourceInfo?.source,
-    }));
+    return [];
 }
 
-async function persistSettingsManager(sm: Awaited<ReturnType<typeof createSettingsManager>>['sm']): Promise<void> {
-    await sm.flush();
-    const errors = sm.drainErrors();
-    if (errors.length > 0) {
-        const msg = errors.map((e) => `${e.scope}: ${e.error.message}`).join('; ');
-        throw new Error(msg);
-    }
+async function persistSettingsManager(_sm: unknown): Promise<void> {
+    /* settings persisted via writePiSettingsJson */
 }
 
 export async function updatePiDefaults(
     fields: { provider?: string; model?: string; thinkingLevel?: string },
-    sessionManager?: PiSessionManager,
+    sessionManager?: PiChatSession,
 ): Promise<void> {
-    const { sm } = await createSettingsManager();
-    if (fields.provider !== undefined && fields.model !== undefined) {
-        sm.setDefaultModelAndProvider(fields.provider, fields.model);
-    } else {
+    writePiSettingsJson((current) => {
+        const next = { ...current };
         if (fields.provider !== undefined) {
-            sm.setDefaultProvider(fields.provider);
+            next.defaultProvider = fields.provider;
         }
         if (fields.model !== undefined) {
-            sm.setDefaultModel(fields.model);
+            next.defaultModel = fields.model;
         }
-    }
-    if (fields.thinkingLevel !== undefined) {
-        sm.setDefaultThinkingLevel(fields.thinkingLevel as 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh');
-    }
-    await persistSettingsManager(sm);
+        if (fields.thinkingLevel !== undefined) {
+            next.defaultThinkingLevel = fields.thinkingLevel;
+        }
+        return next;
+    });
     await applyDefaultsToActiveSession(sessionManager);
 }
 
-export async function setPiPackages(packages: string[], sessionManager?: PiSessionManager): Promise<void> {
-    const { sm } = await createSettingsManager();
-    sm.setPackages(packages);
-    await persistSettingsManager(sm);
+export async function setPiPackages(packages: string[], sessionManager?: PiChatSession): Promise<void> {
+    writePiSettingsJson((current) => ({ ...current, packages }));
     schedulePiSessionReload(sessionManager);
 }
 
 export async function addPiPackage(
     source: string,
-    sessionManager?: PiSessionManager,
+    sessionManager?: PiChatSession,
     outputChannel?: import('vscode').OutputChannel,
 ): Promise<void> {
     const normalized = normalizePiPackageSource(source);
-    const { sm } = await createSettingsManager();
-    const current = sm.getPackages().map(packageSourceToString);
+    const current = getPiPackagesFromSettings();
     if (current.includes(normalized)) {
         return;
     }
@@ -255,11 +248,10 @@ export async function addPiPackage(
 
 export async function removePiPackageAt(
     index: number,
-    sessionManager?: PiSessionManager,
+    sessionManager?: PiChatSession,
     outputChannel?: import('vscode').OutputChannel,
 ): Promise<void> {
-    const { sm } = await createSettingsManager();
-    const packages = sm.getPackages().map(packageSourceToString);
+    const packages = getPiPackagesFromSettings();
     const source = packages[index];
     if (!source) {
         throw new Error('Invalid package index');
@@ -267,100 +259,96 @@ export async function removePiPackageAt(
     await removePiPackageBySource(source, sessionManager, outputChannel);
 }
 
-export async function setPiExtensionPaths(paths: string[], sessionManager?: PiSessionManager): Promise<void> {
-    const { sm } = await createSettingsManager();
-    sm.setExtensionPaths(paths);
-    await persistSettingsManager(sm);
+export async function setPiExtensionPaths(paths: string[], sessionManager?: PiChatSession): Promise<void> {
+    writePiSettingsJson((current) => ({ ...current, extensions: paths }));
+    void sessionManager;
 }
 
-export async function addPiExtensionPath(filePath: string, sessionManager?: PiSessionManager): Promise<void> {
+export async function addPiExtensionPath(filePath: string, sessionManager?: PiChatSession): Promise<void> {
     const trimmed = filePath.trim();
     if (!trimmed) {
         throw new Error('Extension path is empty');
     }
-    const { sm } = await createSettingsManager();
-    const paths = [...sm.getExtensionPaths()];
-    if (!paths.includes(trimmed)) {
-        paths.push(trimmed);
-    }
-    sm.setExtensionPaths(paths);
-    await persistSettingsManager(sm);
+    writePiSettingsJson((current) => {
+        const paths = [...(current.extensions ?? [])];
+        if (!paths.includes(trimmed)) {
+            paths.push(trimmed);
+        }
+        return { ...current, extensions: paths };
+    });
+    void sessionManager;
 }
 
-export async function removePiExtensionPathAt(index: number, sessionManager?: PiSessionManager): Promise<void> {
-    const { sm } = await createSettingsManager();
-    const paths = [...sm.getExtensionPaths()];
-    if (index < 0 || index >= paths.length) {
-        throw new Error('Invalid extension path index');
-    }
-    paths.splice(index, 1);
-    sm.setExtensionPaths(paths);
-    await persistSettingsManager(sm);
+export async function removePiExtensionPathAt(index: number, sessionManager?: PiChatSession): Promise<void> {
+    writePiSettingsJson((current) => {
+        const paths = [...(current.extensions ?? [])];
+        if (index < 0 || index >= paths.length) {
+            throw new Error('Invalid extension path index');
+        }
+        paths.splice(index, 1);
+        return { ...current, extensions: paths };
+    });
+    void sessionManager;
 }
 
-export async function setPiSkillPaths(paths: string[], sessionManager?: PiSessionManager): Promise<void> {
-    const { sm } = await createSettingsManager();
-    sm.setSkillPaths(paths);
-    await persistSettingsManager(sm);
+export async function setPiSkillPaths(paths: string[], sessionManager?: PiChatSession): Promise<void> {
+    writePiSettingsJson((current) => ({ ...current, skills: paths }));
+    void sessionManager;
 }
 
-export async function addPiSkillPath(skillPath: string, sessionManager?: PiSessionManager): Promise<void> {
+export async function addPiSkillPath(skillPath: string, sessionManager?: PiChatSession): Promise<void> {
     const trimmed = skillPath.trim();
     if (!trimmed) {
         throw new Error('Skill path is empty');
     }
-    const { sm } = await createSettingsManager();
-    const paths = [...sm.getSkillPaths()];
-    if (!paths.includes(trimmed)) {
-        paths.push(trimmed);
-    }
-    sm.setSkillPaths(paths);
-    await persistSettingsManager(sm);
+    writePiSettingsJson((current) => {
+        const paths = [...(current.skills ?? [])];
+        if (!paths.includes(trimmed)) {
+            paths.push(trimmed);
+        }
+        return { ...current, skills: paths };
+    });
+    void sessionManager;
 }
 
-export async function removePiSkillPathAt(index: number, sessionManager?: PiSessionManager): Promise<void> {
-    const { sm } = await createSettingsManager();
-    const paths = [...sm.getSkillPaths()];
-    if (index < 0 || index >= paths.length) {
-        throw new Error('Invalid skill path index');
-    }
-    paths.splice(index, 1);
-    sm.setSkillPaths(paths);
-    await persistSettingsManager(sm);
+export async function removePiSkillPathAt(index: number, sessionManager?: PiChatSession): Promise<void> {
+    writePiSettingsJson((current) => {
+        const paths = [...(current.skills ?? [])];
+        if (index < 0 || index >= paths.length) {
+            throw new Error('Invalid skill path index');
+        }
+        paths.splice(index, 1);
+        return { ...current, skills: paths };
+    });
+    void sessionManager;
 }
 
 export async function setPiEnableSkillCommands(
     enabled: boolean,
-    sessionManager?: PiSessionManager,
+    sessionManager?: PiChatSession,
 ): Promise<void> {
-    const { sm } = await createSettingsManager();
-    sm.setEnableSkillCommands(enabled);
-    await persistSettingsManager(sm);
+    writePiSettingsJson((current) => ({ ...current, enableSkillCommands: enabled }));
     schedulePiSessionReload(sessionManager);
 }
 
 export async function setPiSteeringMode(
     mode: 'all' | 'one-at-a-time',
-    sessionManager?: PiSessionManager,
+    sessionManager?: PiChatSession,
 ): Promise<void> {
-    const { sm } = await createSettingsManager();
-    sm.setSteeringMode(mode);
-    await persistSettingsManager(sm);
+    writePiSettingsJson((current) => ({ ...current, steeringMode: mode }));
     await applyDefaultsToActiveSession(sessionManager);
 }
 
 export async function setPiFollowUpMode(
     mode: 'all' | 'one-at-a-time',
-    sessionManager?: PiSessionManager,
+    sessionManager?: PiChatSession,
 ): Promise<void> {
-    const { sm } = await createSettingsManager();
-    sm.setFollowUpMode(mode);
-    await persistSettingsManager(sm);
+    writePiSettingsJson((current) => ({ ...current, followUpMode: mode }));
     await applyDefaultsToActiveSession(sessionManager);
 }
 
 export async function openPiAgentFile(file: 'settings' | 'auth' | 'mcp'): Promise<void> {
-    const agentDir = await getPiAgentDir();
+    const agentDir = getPiAgentDir();
     const names: Record<typeof file, string> = {
         settings: 'settings.json',
         auth: 'auth.json',
@@ -374,18 +362,23 @@ export async function openPiAgentFile(file: 'settings' | 'auth' | 'mcp'): Promis
     await vscode.window.showTextDocument(doc, { preview: false });
 }
 
-async function applyDefaultsToActiveSession(sessionManager?: PiSessionManager): Promise<void> {
-    const session = sessionManager?.session;
-    if (!session) {
+async function applyDefaultsToActiveSession(sessionManager?: PiChatSession): Promise<void> {
+    if (!sessionManager) {
         return;
     }
-    const { applyPiCliDefaultModel } = await import('./piCliSync');
-    await applyPiCliDefaultModel(session);
+    const { readPiCliSettingsSummary } = await import('./piCliSync');
+    const summary = readPiCliSettingsSummary();
+    if (summary.defaultProvider && summary.defaultModel) {
+        await sessionManager.setModel(summary.defaultProvider, summary.defaultModel);
+    }
+    if (summary.defaultThinkingLevel) {
+        sessionManager.setThinkingLevel(summary.defaultThinkingLevel);
+    }
 }
 
 /** Apply ~/.pi/agent changes to the live session without blocking the settings UI. */
 export function schedulePiSessionReload(
-    sessionManager: PiSessionManager | undefined,
+    sessionManager: PiChatSession | undefined,
     outputChannel?: import('vscode').OutputChannel,
 ): void {
     if (!sessionManager) {

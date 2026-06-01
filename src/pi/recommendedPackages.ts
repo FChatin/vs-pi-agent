@@ -1,16 +1,10 @@
-import type { AgentSession } from '@earendil-works/pi-coding-agent';
-
 export interface RecommendedPiPackage {
     id: string;
-    /** Pi package source string for settings.json / pi install */
     source: string;
     label: string;
     description: string;
-    /** Match if any configured package source contains this substring */
     packageMatch: string;
-    /** When set, also treat as installed if this slash command is registered */
     slashCommand?: string;
-    /** Shown in prompts — core UX vs optional integration */
     tier: 'core' | 'optional';
 }
 
@@ -40,31 +34,18 @@ export function isPackageSourceConfigured(packages: string[], match: string): bo
     return packages.some((p) => p.toLowerCase().includes(needle));
 }
 
-export function getRegisteredSlashCommands(session: AgentSession | undefined): string[] {
-    if (!session?.extensionRunner) {
-        return [];
-    }
-    try {
-        return session.extensionRunner.getRegisteredCommands().map((c) => c.invocationName);
-    } catch {
-        return [];
-    }
-}
-
 /**
  * Missing = not listed in ~/.pi/agent settings packages.
- * (If listed but load failed, user should Reload session — not reinstall.)
  */
 export function getMissingRecommendedPackages(
     configuredPackages: string[],
-    session?: AgentSession,
+    slashCommands: string[] = [],
 ): RecommendedPiPackage[] {
-    const slash = getRegisteredSlashCommands(session);
     return RECOMMENDED_PI_PACKAGES.filter((pkg) => {
         if (isPackageSourceConfigured(configuredPackages, pkg.packageMatch)) {
             return false;
         }
-        if (pkg.slashCommand && slash.includes(pkg.slashCommand)) {
+        if (pkg.slashCommand && slashCommands.includes(pkg.slashCommand)) {
             return false;
         }
         return true;

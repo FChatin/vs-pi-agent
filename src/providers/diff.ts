@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import type { PiSessionManager } from '../pi/session';
+import type { PiChatSession } from '../pi/slashCommands';
 import type { FileChangeInfo } from '../shared/protocol';
 import type { CheckpointManager } from './checkpoint';
 import { computeUnifiedDiff } from '../utils/diff';
@@ -17,7 +17,7 @@ interface PendingEdit {
 type FileChangeListener = (change: FileChangeInfo) => void;
 
 export class DiffManager implements vscode.Disposable {
-    private _session: PiSessionManager;
+    private _session: PiChatSession;
     private _checkpoint: CheckpointManager;
     private _pendingEdits = new Map<string, PendingEdit>();
     private _fileChanges: FileChangeInfo[] = [];
@@ -26,7 +26,7 @@ export class DiffManager implements vscode.Disposable {
     private _listeners: FileChangeListener[] = [];
     private _currentTurn = 0;
 
-    constructor(session: PiSessionManager, checkpoint: CheckpointManager) {
+    constructor(session: PiChatSession, checkpoint: CheckpointManager) {
         this._session = session;
         this._checkpoint = checkpoint;
 
