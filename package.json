@@ -1,9 +1,9 @@
 {
   "name": "vscode-pi-agent",
-	"displayName": "vscode-pi-agent",
+  "displayName": "vscode-pi-agent",
   "description": "Pi coding agent in VS Code — sidebar GUI for `pi --mode rpc` (full CLI parity, no bundled SDK).",
-	"version": "0.2.56",
-	"publisher": "fchatin",
+  "version": "0.2.40",
+  "publisher": "fchatin",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -195,21 +195,21 @@
       }
     }
   },
-	"scripts": {
-		"compile": "node esbuild.js",
-		"watch": "node esbuild.js --watch",
-		"vscode:prepublish": "npm run compile",
-		"package": "npm run compile && npx @vscode/vsce package --no-rewrite-relative-links",
-		"package:verify": "unzip -l vs-pi-agent-*.vsix | grep -E 'out/webview/styles|media/icons'",
+  "scripts": {
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "vscode:prepublish": "npm run compile",
+    "package": "npm run compile && npx @vscode/vsce package --no-rewrite-relative-links",
+    "package:verify": "unzip -l vs-pi-agent-*.vsix | grep -E 'out/webview/styles|media/icons'",
     "test": "vitest",
     "test:unit": "vitest run",
     "test:integration": "node out/test/integration/runTest.js",
     "test:all": "npm run test:unit && npm run test:integration"
   },
-	"dependencies": {
-		"marked": "^18.0.2",
-		"proper-lockfile": "^4.1.2"
-	},
+  "dependencies": {
+    "marked": "^18.0.2",
+    "proper-lockfile": "^4.1.2"
+  },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.0.0",
