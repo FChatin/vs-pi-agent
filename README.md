@@ -3,6 +3,7 @@
 Pi coding agent in VS Code — sidebar chat, diffs, checkpoints, plan mode, and Pi CLI sync.
 
 **Repository:** [github.com/FChatin/vs-pi-agent](https://github.com/FChatin/vs-pi-agent)
+**Install:** [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=FChatin.vscode-pi-agent) · [OpenVSX](https://open-vsx.org/extension/fchatin/vscode-pi-agent)
 
 ## Requirements
 
