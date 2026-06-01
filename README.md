@@ -76,7 +76,7 @@ Extension writes to `~/.pi/agent/settings.json` (same as CLI). Sessions, skills,
 
 ## Version history
 
-### v0.2.39
+### v0.2.40
 - Pi CLI RPC mode (Pi CLI required, no SDK bundling)
 - Settings panel with auth flow, thinking level, MCP import
 - Diff & undo per file-edit turn
