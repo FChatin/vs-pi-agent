@@ -1,105 +1,85 @@
 # vs-pi-agent
 
-Pi coding agent in VS Code — sidebar chat, session management, diffs, checkpoints, and full Pi CLI integration.
+Pi coding agent in VS Code — sidebar chat, diffs, checkpoints, plan mode, and Pi CLI sync.
 
 **Repository:** [github.com/FChatin/vs-pi-agent](https://github.com/FChatin/vs-pi-agent)
 
-## How it works
-
-The extension spawns the Pi CLI as a local subprocess and communicates with it over **stdin/stdout JSONL RPC**. Everything runs through the real CLI — no bundled SDK.
-
-```
-VS Code ←→ Extension ←→ RPC bridge ←→ pi CLI subprocess
-                                     ↳ reads ~/.pi/agent/config
-                                     ↳ writes session logs to ~/.pi/agent/sessions/
-```
-
 ## Requirements
 
-- [Pi CLI](https://github.com/badlogic/pi-mono) installed and on PATH
-- VS Code 1.100+
-- Model provider credentials — see [Authentication](#authentication)
+- **Pi CLI** must be installed (`npm install -g pi-agent` or `brew install pi-agent`)
+- VS Code or VSCodium
 
-## Quick start
-
-1. Install the extension (VSIX or development build below).
-2. Make sure `pi` is installed: `npm i -g @earendil-works/pi-coding-agent`
-3. Open the **vs-pi-agent** sidebar.
-4. Configure a provider:
-   - **Settings → Configure provider (/login)**, or
-   - type `/login` in chat, or
-   - Command Palette → **vs-pi-agent: Login (/login)**
-5. Pick a model from the status bar or with `/model`.
-6. Start chatting.
+The extension communicates with Pi via `pi --mode rpc`. It does not bundle the SDK — everything runs through the CLI. No Pi CLI = extension won't work.
 
 ## Features
 
-- **Sidebar chat** — send prompts, receive streaming responses, attach files
-- **Slash commands** — `/login`, `/logout`, `/model`, `/new`, `/reload`, `/compact`, `/resume`, `/session`
-- **Plan mode** — `/plan` triggers Pi's plan/agent mode if `pi-plan-mode` is installed
-- **File diffs** — review pending changes before and after each turn
-- **Checkpoints** — undo/restore file state at turn boundaries
-- **Session management** — browse, resume, and switch between sessions in `~/.pi/agent/sessions/`
-- **MCP servers** — load MCP configs from `mcp.json` (requires `pi-mcp-adapter`)
-- **Recommended packages** — first-launch prompt to install `pi-plan-mode` and `pi-mcp-adapter`
-
-## Authentication
-
-Credentials are stored in `~/.pi/agent/auth.json` (same file Pi CLI uses). The extension never commits secrets to the workspace.
-
-| Method | How |
-|--------|-----|
-| **Settings UI** | **vs-pi-agent: Open Settings** → **Configure provider (/login)** |
-| **Chat** | `/login` and `/logout` |
-| **Command Palette** | **vs-pi-agent: Login (/login)** / **Logout (/logout)** |
-| **Manual** | Settings → **Open auth.json**, or edit the file directly |
-| **Environment** | e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` |
+**Chat & agents** — send messages, receive streaming responses, view thinking steps  
+**Diff & undo** — see unified diffs for every file change; undo or redo changes per turn  
+**Checkpoints** — roll back to any previous turn; redo after rollback  
+**Plan mode** — Pi drafts a plan in a VS Code document; apply complete sections with one click  
+**Attachments** — drag files or paste images directly into chat  
+**Slash commands** — `/login`, `/logout`, `/model`, `/new`, `/settings`, `/reload`, `/compact`, `/resume`, `/session`  
+**MCP config import** — bring MCP server configs from Cursor, Zed, or VS Code  
+**Settings panel** — configure auth, thinking level, workspace scope, sync mode  
+**Status bar** — connection status at a glance  
+**Session catalog** — list, resume, or switch between sessions  
+**Checkpoint + Todo merge** — Pi-managed plan todos merged into VS Code with task markers  
 
 ## Configuration
 
-**Use Pi CLI configuration** is enabled by default. The extension reads and writes `~/.pi/agent` — `settings.json`, `auth.json`, `mcp.json`, packages, skills, and sessions.
+| Setting | Default | Description |
+|---|---|---|
+| `pi-agent.authProvider` | `pi-cli` | Authentication provider (`pi-cli`) |
+| `pi-agent.syncWithPiCli` | `true` | Use `~/.pi/agent` for config, sessions, skills |
+| `pi-agent.cliPath` | auto | Force a specific `pi` binary path |
+| `pi-agent.thinkingLevel` | `off` | Thinking level (`off`, `fast`, `deep`) |
+| `pi-agent.workspaceScope` | `current` | Session scope (`current` or `all`) |
+| `pi-agent.tools` | built-in | Enabled tool groups |
+| `pi-agent.modelProvider` | auto | Preferred model provider |
+| `pi-agent.modelId` | auto | Preferred model |
+| `pi-agent.maxTokens` | auto | Max tokens per response |
+| `pi-agent.autoApproveTools` | `ask` | Tool auto-approval (`ask`, `all`, `none`) |
+| `pi-agent.promptTemplates` | `[]` | Custom prompt prefixes |
+| `pi-agent.mcpConfigImportPaths` | `[]` | Paths to import MCP configs from |
 
-Open **vs-pi-agent: Open Settings** to manage:
+## Architecture
 
-- Default provider and model
-- Pi packages
-- Extension and skill paths
-- MCP servers
-- Tool auto-approve and session options
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| **vs-pi-agent: Focus Chat** | `Cmd/Ctrl+Shift+L` |
-| **vs-pi-agent: New Chat** | `Cmd/Ctrl+Shift+N` |
-| **vs-pi-agent: Login (/login)** | Configure provider auth |
-| **vs-pi-agent: Logout (/logout)** | Remove stored credentials |
-| **vs-pi-agent: Open Settings** | Full Pi agent configuration |
-| **vs-pi-agent: Select Model** | Model picker |
-| **vs-pi-agent: Reload Session** | Reload packages, skills, extensions |
-
-## Install from source
-
-```bash
-git clone https://github.com/FChatin/vs-pi-agent.git
-cd vs-pi-agent
-npm install
-npm run compile
+```
+VS Code extension
+    │
+    └─── starts ──────────>  pi --mode rpc  (Pi CLI subprocess)
+                               │
+                               ├──  /login  →  Pi CLI handles auth
+                               ├──  /model  →  Pi CLI manages providers
+                               ├──  thinking →  streaming events over JSON-RPC
+                               └──  tools  →  executed by Pi CLI
 ```
 
-**VSIX:** `npm run package` → *Extensions → Install from VSIX…*
+Extension writes to `~/.pi/agent/settings.json` (same as CLI). Sessions, skills, and packages live under `~/.pi/agent`.
 
-## Development
+## Keyboard shortcuts
 
-```bash
-npm run compile
-npm run watch      # optional
-npm run test:unit
-```
+| Action | Shortcut |
+|---|---|
+| Open sidebar | `Ctrl+Shift+P` → "Pi: Open Chat" |
+| New session | `Ctrl+Shift+P` → "Pi: New Session" |
+| Resume session | `Ctrl+Shift+P` → "Pi: Resume Session" |
+| Apply plan section | `Ctrl+Shift+A` |
+| Reject plan section | `Ctrl+Shift+R` |
 
-Press **F5** for Extension Development Host.
+## Quick start
 
-## License
+1. Install Pi CLI: `npm install -g pi-agent`
+2. Install extension: **Install from VSIX** in VS Code Extensions
+3. Set provider: `/login` or Settings → **Configure provider**
+4. Start chatting
 
-MIT — see [LICENSE](LICENSE).
+## Version history
+
+### v0.2.39
+- Pi CLI RPC mode (Pi CLI required, no SDK bundling)
+- Settings panel with auth flow, thinking level, MCP import
+- Diff & undo per file-edit turn
+- Checkpoint & rollback per conversation turn
+- Plan mode with VS Code document integration
+- MCP config import from Cursor / Zed / VS Code
